@@ -139,6 +139,27 @@ async def fetch_news_summary(query: str) -> str:
 
 
 # Tool Declarations
+KNOWLEDGE_TOOL_DECLARATION = types.FunctionDeclaration(
+    name="query_knowledge_base",
+    description=(
+        "Query the internal Riva and NextGen Supercomputing Club knowledge base for factual information about team members "
+        "(e.g. Ankit Singh Tomar, Raj Ojha, Ayush Pathak), core leads, creators, developers, contributors, "
+        "NextGen club projects, multimodal voice assistant architectures, and internal facts. "
+        "Call this tool whenever the user asks who created, built, or developed Riva, asks about club members or leads, "
+        "or asks about NextGen Supercomputing Club projects and internal organizational facts."
+    ),
+    parameters=types.Schema(
+        type="OBJECT",
+        properties={
+            "query": types.Schema(
+                type="STRING",
+                description="The search query, topic, or person name to look up in the knowledge base (e.g. 'Ankit tomar', 'Raj Ojha', 'Ayush Pathak', 'NextGen Supercomputing Club')",
+            )
+        },
+        required=["query"],
+    ),
+)
+
 NEWS_TOOL_DECLARATION = types.FunctionDeclaration(
     name="get_latest_news",
     description=(
@@ -154,7 +175,7 @@ NEWS_TOOL_DECLARATION = types.FunctionDeclaration(
 )
 
 DEFAULT_TOOLS: List[types.Tool] = [
-    types.Tool(function_declarations=[NEWS_TOOL_DECLARATION])
+    types.Tool(function_declarations=[KNOWLEDGE_TOOL_DECLARATION, NEWS_TOOL_DECLARATION])
 ]
 
 
@@ -163,9 +184,22 @@ async def _handle_get_latest_news(args: Dict[str, Any]) -> str:
     return await fetch_news_summary(query)
 
 
+async def _handle_query_knowledge_base(args: Dict[str, Any]) -> str:
+    query = str((args or {}).get("query", "")).strip()
+    if not query:
+        return "Please specify a query to look up in the knowledge base."
+    try:
+        from rag_knowledge.service import query_rag
+        return await query_rag(query)
+    except Exception as e:
+        logger.error(f"Error querying RAG knowledge base for '{query}': {e}", exc_info=True)
+        return f"Could not retrieve knowledge for '{query}' due to an internal error."
+
+
 # Extensible Tool Handler Registry
 TOOL_REGISTRY: Dict[str, Callable[[Dict[str, Any]], Awaitable[str]]] = {
     "get_latest_news": _handle_get_latest_news,
+    "query_knowledge_base": _handle_query_knowledge_base,
 }
 
 

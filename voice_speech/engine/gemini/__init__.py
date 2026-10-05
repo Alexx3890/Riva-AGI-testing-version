@@ -4,6 +4,7 @@ from .tools import (
     TOOL_REGISTRY,
     DEFAULT_TOOLS,
     NEWS_TOOL_DECLARATION,
+    KNOWLEDGE_TOOL_DECLARATION,
 )
 from .session import (
     build_connect_config,
@@ -21,6 +22,7 @@ __all__ = [
     "TOOL_REGISTRY",
     "DEFAULT_TOOLS",
     "NEWS_TOOL_DECLARATION",
+    "KNOWLEDGE_TOOL_DECLARATION",
     "build_connect_config",
     "build_vad_config",
     "build_speech_config",

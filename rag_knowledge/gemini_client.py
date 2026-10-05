@@ -29,7 +29,14 @@ class GeminiRAGClient:
         timeout: Optional[float] = None,
     ):
         self.api_key = api_key if api_key is not None else os.getenv("GEMINI_API_KEY", "").strip()
-        self.model = model if model is not None else os.getenv("GEMINI_MODEL", DEFAULT_GEMINI_MODEL).strip() or DEFAULT_GEMINI_MODEL
+        if model is not None:
+            self.model = model
+        else:
+            rag_model = os.getenv("GEMINI_RAG_MODEL", "").strip()
+            gen_model = os.getenv("GEMINI_MODEL", "").strip()
+            if gen_model and "live" in gen_model.lower():
+                gen_model = ""
+            self.model = rag_model or gen_model or DEFAULT_GEMINI_MODEL
         env_timeout = float(os.getenv("GEMINI_TIMEOUT", "10.0"))
         self.timeout = timeout if timeout is not None else env_timeout
 

@@ -7,6 +7,7 @@ from voice_speech.engine.gemini.tools import (
     fetch_news_summary,
     TOOL_REGISTRY,
     NEWS_TOOL_DECLARATION,
+    KNOWLEDGE_TOOL_DECLARATION,
 )
 
 
@@ -14,6 +15,10 @@ def test_tool_declaration():
     assert NEWS_TOOL_DECLARATION.name == "get_latest_news"
     assert "query" in NEWS_TOOL_DECLARATION.parameters.properties
     assert "query" in NEWS_TOOL_DECLARATION.parameters.required
+
+    assert KNOWLEDGE_TOOL_DECLARATION.name == "query_knowledge_base"
+    assert "query" in KNOWLEDGE_TOOL_DECLARATION.parameters.properties
+    assert "query" in KNOWLEDGE_TOOL_DECLARATION.parameters.required
 
 
 @pytest.mark.anyio
@@ -23,6 +28,15 @@ async def test_dispatch_registered_tool():
         result = await dispatch_tool_call("get_latest_news", {"query": "artificial intelligence"})
         assert result == "Mocked Headline 1 | Mocked Headline 2"
         mock_fetch.assert_called_once_with("artificial intelligence")
+
+
+@pytest.mark.anyio
+async def test_dispatch_knowledge_tool():
+    with patch("rag_knowledge.service.query_rag") as mock_rag:
+        mock_rag.return_value = "Ankit Singh Tomar is an AI engineer."
+        result = await dispatch_tool_call("query_knowledge_base", {"query": "Ankit tomar"})
+        assert result == "Ankit Singh Tomar is an AI engineer."
+        mock_rag.assert_called_once_with("Ankit tomar")
 
 
 @pytest.mark.anyio
