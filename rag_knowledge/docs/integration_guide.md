@@ -1,6 +1,6 @@
 # Integration Guide: Merging `rag_knowledge` into Other Systems
 
-Because `rag_knowledge` is designed as a standalone, self-contained Python package, integrating or merging it into another repository or service takes only a few lines of code.
+Because `rag_knowledge` is designed as a standalone, modular Python package, integrating or merging it into another repository or service takes only a few lines of code.
 
 ---
 
@@ -25,7 +25,7 @@ RAG_TOOL_SCHEMA = {
     "type": "function",
     "function": {
         "name": "query_knowledge_base",
-        "description": "Query internal knowledge base for facts about people (e.g. Alex Doe) and club projects.",
+        "description": "Query internal knowledge base for facts about people and university records.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -48,7 +48,7 @@ from rag_knowledge.service import query_rag
 
 KNOWLEDGE_TOOL = types.FunctionDeclaration(
     name="query_knowledge_base",
-    description="Query internal RAG facts about team members and projects.",
+    description="Query internal RAG facts about university records and members.",
     parameters=types.Schema(
         type="OBJECT",
         properties={"query": types.Schema(type="STRING", description="Search query")},
@@ -75,6 +75,6 @@ async def rag_endpoint(q: str = Query(..., description="Query string")):
 
 ---
 
-## 4. Extending Storage Backends to Vector DBs in Future
+## 4. Vector Storage Backend
 
-When your knowledge base requires embedding-based semantic vector search, simply subclass or extend `KnowledgeRetriever` in `rag_knowledge/retriever.py` with your vector store (ChromaDB, Pinecone, FAISS, etc.) without altering the public `query_rag` interface.
+`rag_knowledge` uses Qdrant Vector Database (`qdrant_storage.py`) with FastEmbed dense vector embeddings. You can connect to Qdrant Cloud or a local Qdrant instance simply by setting `QDRANT_URL` and `QDRANT_API_KEY` in `.env`.

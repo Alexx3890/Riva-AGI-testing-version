@@ -14,12 +14,8 @@ import asyncio
 import os
 import sys
 
-# Support running directly as a script
-if __package__ is None or __package__ == "":
-    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-from rag_knowledge import load_env
-from rag_knowledge.service import get_rag_service, query_rag
+from . import load_env
+from .service import get_rag_service, query_rag
 
 
 def list_knowledge_entries():
@@ -35,7 +31,7 @@ def list_knowledge_entries():
         print()
 
 
-async def run_query(query: str, verbose: bool = False):
+async def run_query(query: str, verbose: bool = True):
     """Executes a query against the RAG service and prints results."""
     service = get_rag_service()
     pre_matches = None
@@ -72,7 +68,13 @@ def main():
     parser.add_argument(
         "-v", "--verbose",
         action="store_true",
-        help="Print retrieval scoring and matching details",
+        default=True,
+        help="Print retrieval scoring and matching details (enabled by default)",
+    )
+    parser.add_argument(
+        "-q", "--quiet",
+        action="store_true",
+        help="Suppress retrieval ranking matches and print only the final answer",
     )
 
     args = parser.parse_args()
@@ -85,7 +87,8 @@ def main():
         parser.print_help()
         sys.exit(1)
 
-    asyncio.run(run_query(args.query, verbose=args.verbose))
+    show_matches = False if args.quiet else True
+    asyncio.run(run_query(args.query, verbose=show_matches))
 
 
 if __name__ == "__main__":

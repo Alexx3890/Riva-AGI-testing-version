@@ -2,12 +2,12 @@
 
 from unittest.mock import MagicMock
 import pytest
-from rag_knowledge.retriever import KnowledgeRetriever
-from rag_knowledge.storage.mongo import MongoKnowledgeStore
+from rag_knowledge.retrieval.retriever import KnowledgeRetriever
+from rag_knowledge.storage.qdrant_storage import QdrantKnowledgeStore
 
 
 def test_retrieve_empty_query():
-    mock_store = MagicMock(spec=MongoKnowledgeStore)
+    mock_store = MagicMock(spec=QdrantKnowledgeStore)
     retriever = KnowledgeRetriever(store=mock_store)
     assert retriever.retrieve("") == []
     assert retriever.retrieve("   ") == []
@@ -15,7 +15,7 @@ def test_retrieve_empty_query():
 
 
 def test_retriever_delegates_to_store():
-    mock_store = MagicMock(spec=MongoKnowledgeStore)
+    mock_store = MagicMock(spec=QdrantKnowledgeStore)
     sample_docs = [
         {
             "id": "member_1",
@@ -31,8 +31,8 @@ def test_retriever_delegates_to_store():
     retriever = KnowledgeRetriever(store=mock_store)
 
     # Test retrieve()
-    results = retriever.retrieve("Member One", top_k=2, min_score=3.0)
-    mock_store.search_text.assert_called_once_with("Member One", top_k=2, min_score=3.0)
+    results = retriever.retrieve("Member One", top_k=2, min_score=0.45)
+    mock_store.search_text.assert_called_once_with("Member One", top_k=2, min_score=0.45)
     assert len(results) == 1
     assert results[0]["id"] == "member_1"
 
@@ -44,7 +44,7 @@ def test_retriever_delegates_to_store():
 
 
 def test_build_context_string():
-    mock_store = MagicMock(spec=MongoKnowledgeStore)
+    mock_store = MagicMock(spec=QdrantKnowledgeStore)
     mock_store.search_text.return_value = [
         {"title": "Doc A", "content": "Details A"},
         {"title": "Doc B", "content": "Details B"},
@@ -57,7 +57,7 @@ def test_build_context_string():
 
 
 def test_build_context_string_empty():
-    mock_store = MagicMock(spec=MongoKnowledgeStore)
+    mock_store = MagicMock(spec=QdrantKnowledgeStore)
     mock_store.search_text.return_value = []
 
     retriever = KnowledgeRetriever(store=mock_store)
@@ -66,7 +66,7 @@ def test_build_context_string_empty():
 
 
 def test_retrieve_error_handling():
-    mock_store = MagicMock(spec=MongoKnowledgeStore)
+    mock_store = MagicMock(spec=QdrantKnowledgeStore)
     mock_store.search_text.side_effect = RuntimeError("Database timeout")
 
     retriever = KnowledgeRetriever(store=mock_store)

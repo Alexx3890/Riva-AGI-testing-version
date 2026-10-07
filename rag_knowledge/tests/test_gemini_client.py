@@ -5,7 +5,7 @@ import json
 import urllib.error
 from unittest.mock import MagicMock, patch
 import pytest
-from rag_knowledge.gemini_client import GeminiRAGClient, DEFAULT_GEMINI_MODEL
+from rag_knowledge.clients.gemini_client import GeminiRAGClient, DEFAULT_GEMINI_MODEL
 
 
 def test_client_configuration(monkeypatch):
