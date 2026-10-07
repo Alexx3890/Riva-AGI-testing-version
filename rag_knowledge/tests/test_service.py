@@ -3,8 +3,8 @@
 import pytest
 from unittest.mock import AsyncMock, MagicMock
 from rag_knowledge.service import RAGService, query_rag, get_rag_service
-from rag_knowledge.retriever import KnowledgeRetriever
-from rag_knowledge.gemini_client import GeminiRAGClient
+from rag_knowledge.retrieval.retriever import KnowledgeRetriever
+from rag_knowledge.clients.gemini_client import GeminiRAGClient
 
 
 @pytest.mark.anyio
@@ -98,3 +98,39 @@ async def test_global_query_rag_helper(monkeypatch):
     monkeypatch.setattr("rag_knowledge.service.get_rag_service", lambda: mock_service)
     res = await query_rag("Who is Alex Doe?")
     assert "Alex Doe" in res
+
+
+@pytest.mark.anyio
+async def test_service_score_gap_runner_up_bleed_prevention():
+    """Verifies that when runner-up has a narrow score gap (< 6.0) and top score < 95.0,
+    only top match is passed to Gemini context to prevent mixing facts."""
+    mock_llm = MagicMock(spec=GeminiRAGClient)
+    mock_llm.is_configured = True
+    mock_llm.generate_answer = AsyncMock(return_value="Answer")
+
+    mock_retriever = MagicMock()
+    # Top score 74.2, runner-up 70.05 (gap = 4.15 < 6.0, top_score < 95.0)
+    mock_retriever.retrieve.return_value = [
+        {
+            "id": "student_1",
+            "title": "Kishan Singh",
+            "summary": "CSIT Student",
+            "content": "Kishan Singh Profile",
+            "score": 74.2,
+        },
+        {
+            "id": "student_2",
+            "title": "Kishan Kumar",
+            "summary": "ECE Student",
+            "content": "Kishan Kumar Profile",
+            "score": 70.05,
+        },
+    ]
+
+    service = RAGService(retriever=mock_retriever, llm_client=mock_llm)
+    await service.query("Tell me about Kishan Singh")
+
+    mock_llm.generate_answer.assert_awaited_once()
+    context_sent = mock_llm.generate_answer.call_args[0][1]
+    assert "Kishan Singh Profile" in context_sent
+    assert "Kishan Kumar Profile" not in context_sent, "Runner-up should be excluded due to narrow score gap"

@@ -1,130 +1,231 @@
 # RAG Knowledge Subsystem (`rag_knowledge`)
 
-A modular, database-backed, self-contained Retrieval-Augmented Generation (RAG) package. Designed to provide fast factual knowledge retrieval and Google Gemini synthesis for conversational agents, voice assistants, and multi-agent platforms.
+A fast, self-contained Retrieval-Augmented Generation (RAG) package built for Riva. It gives conversational assistants and voice agents instant access to factual knowledge (students, mentors, departments, and campus info) with natural spoken responses powered by Google Gemini.
 
 ---
 
-## Highlights
+## How It Works (At a Glance)
 
-- **Completely Self-Contained**: Can be run, tested, and imported independently or merged with other systems without impacting other directories.
-- **Database-Backed RAG Storage**: Powered by MongoDB (`riva_knowledge.knowledge_documents`) with weighted full-text search and alias matching.
-- **Dynamic Live Updates**: Add, modify, or delete knowledge documents directly in MongoDB without server restarts or redeployments.
-- **Auto `.env` Discovery**: Automatically detects and loads `.env` from package or workspace roots on import.
-- **Google Gemini Synthesis**: Uses Gemini Flash (`gemini-flash-lite-latest` by default) via standard Python `urllib` with strict grounding prompts to generate concise, 2–3 sentence spoken answers.
-- **Resilient Fallback**: If `GEMINI_API_KEY` is omitted, rate-limited, or unavailable, it immediately returns the factual grounded text directly so conversational pipelines never fail.
+```text
+User Question ("Who is Nikhil Kumar?")
+               │
+               ▼
+┌──────────────────────────────────────────────┐
+│  1. Hybrid Retrieval                         │
+│     • FastEmbed (local 384-d dense vector)   │
+│     • Exact ID / Roll No boost (score 100.0) │
+│     • Qdrant Cloud vector search             │
+└──────────────────────┬───────────────────────┘
+                       │ Matched Documents
+                       ▼
+┌──────────────────────────────────────────────┐
+│  2. Gemini Synthesis (gemini-flash-lite)     │
+│     • Concise 2–3 sentence spoken answer     │
+│     • Direct factual fallback if key unset   │
+└──────────────────────┬───────────────────────┘
+                       │
+                       ▼
+Spoken Answer / Structured Facts to User
+```
 
 ---
 
-## Directory Structure
+## Quick Setup
+
+### 1. Configure Environment Variables
+Copy `.env.example` to `.env` in your project root or `rag_knowledge/`:
+
+```bash
+cp rag_knowledge/.env.example .env
+```
+
+Fill in your credentials:
+```ini
+# Google Gemini (Optional: system returns facts directly if omitted)
+GEMINI_API_KEY=your_gemini_api_key_here
+GEMINI_MODEL=gemini-flash-lite-latest
+GEMINI_TIMEOUT=4.0
+
+# Qdrant Cloud (Vector Database)
+QDRANT_URL=https://your-cluster-id.us-east-1-1.aws.cloud.qdrant.io
+QDRANT_API_KEY=your_qdrant_api_key_here
+QDRANT_WRITE_API_KEY=your_qdrant_write_api_key_here
+QDRANT_COLLECTION=riva_knowledge
+
+# Embedding Model (Optional, defaults to BAAI/bge-small-en-v1.5)
+EMBEDDING_MODEL=BAAI/bge-small-en-v1.5
+```
+
+### 2. Install Dependencies
+```bash
+pip install -r rag_knowledge/requirements.txt
+```
+
+### 3. Pre-warm Embedding Model (Optional)
+The system uses `BAAI/bge-small-en-v1.5` via FastEmbed ONNX. On the very first run, it downloads the model (~130 MB) to `~/.cache/fastembed/`. You can pre-cache it ahead of time:
+```bash
+python -c "from fastembed import TextEmbedding; TextEmbedding('BAAI/bge-small-en-v1.5')"
+```
+
+---
+
+## Project Structure
+
+The package is flat and self-contained under `rag_knowledge/`:
 
 ```text
 rag_knowledge/
-├── __init__.py                # Package exports (query_rag, KnowledgeRetriever, GeminiRAGClient, RAGService)
-├── __main__.py                # Package entrypoint (python -m rag_knowledge)
-├── cli.py                     # Command-line query tool & inspector
-├── gemini_client.py           # Gemini API synthesis client with standard urllib
-├── retriever.py               # Database-backed search retriever over MongoDB
-├── service.py                 # RAG orchestrator coordinating retrieval & generation
-├── storage/                   # Database storage layer
+├── __init__.py           # Public exports (query_rag, get_rag_service, etc.)
+├── __main__.py           # CLI runner (python -m rag_knowledge)
+├── cli.py                # Command-line interface logic
+├── prompts.py            # Prompt templates, versioning & input sanitization
+├── service.py            # High-level RAG service (retrieval + synthesis)
+├── clients/
 │   ├── __init__.py
-│   └── mongo.py               # MongoDB connection pooling & full-text indexing
-├── requirements.txt           # Package requirements
-├── README.md                  # Main documentation
-├── docs/
-│   ├── architecture.md        # Technical architecture details
-│   └── integration_guide.md   # Guide on integrating into any system / voice agent
-└── tests/
-    ├── __init__.py
-    ├── conftest.py            # Hermetic test isolation fixtures
-    ├── test_retriever.py      # Unit tests for retriever
-    ├── test_mongo_storage.py  # Unit tests for MongoDB storage layer
-    ├── test_gemini_client.py  # Unit tests for Gemini API client and fallbacks
-    └── test_service.py        # Unit tests for RAG service coordination
+│   └── gemini_client.py  # Zero-dependency Gemini caller via urllib
+├── ingestion/
+│   ├── __init__.py
+│   └── ingest.py         # Excel data ingestion & privacy guard pipeline
+├── retrieval/
+│   ├── __init__.py
+│   └── retriever.py      # Knowledge retrieval & context string formatting
+├── storage/
+│   ├── __init__.py
+│   └── qdrant_storage.py # Qdrant Cloud client, FastEmbed vectors & hybrid search
+├── data/
+│   └── raw/              # Raw spreadsheets (.xlsx) — gitignored
+├── tests/                # Hermetic unit test suite (36 tests)
+│   ├── conftest.py
+│   ├── test_gemini_client.py
+│   ├── test_ingest.py
+│   ├── test_prompts.py
+│   ├── test_qdrant_storage.py
+│   ├── test_retriever.py
+│   └── test_service.py
+├── docs/                 # Documentation notes
+├── .env.example          # Environment variable template
+├── .gitignore            # Ignores secrets, cache, and data/*
+├── README.md             # This guide
+├── requirements.txt      # Production runtime dependencies
+└── requirements-dev.txt  # Development & test dependencies
 ```
 
 ---
 
-## Quick Start
+## How to Use
 
-### 1. Standalone CLI Usage
+### 1. From the Command Line (CLI)
 
-Query the knowledge base directly from your terminal:
-
+Ask a natural language question:
 ```bash
-# Ask a question
-python -m rag_knowledge "Do you know about Alex Doe?"
-
-# List all stored knowledge documents
-python -m rag_knowledge --list
-
-# Query with retrieval match scores
-python -m rag_knowledge "Who is Alex Doe?" -v
+python -m rag_knowledge "Tell me about Nikhil Kumar"
 ```
-  
-### 2. Python API Usage
 
-Import into any Python application:
+Look up by student UID or university roll number:
+```bash
+python -m rag_knowledge "2630BTECH0121"
+```
+
+Inspect match candidates and similarity scores (verbose mode):
+```bash
+python -m rag_knowledge "Who is mentored by Dr. Meeta Chaudhry?" -v
+```
+
+List stored documents:
+```bash
+python -m rag_knowledge --list
+```
+
+### 2. In Python Code
 
 ```python
 import asyncio
 from rag_knowledge import query_rag
 
 async def main():
-    # Asynchronously query the RAG service
-    answer = await query_rag("Who is Alex Doe?")
-    print("Answer:", answer)
+    # Ask a question and get a conversational answer
+    answer = await query_rag("Tell me about Nikhil Kumar")
+    print(answer)
 
-asyncio.run(main())
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
+Directly access the Qdrant store:
+```python
+from rag_knowledge.storage import get_global_qdrant_store
+
+store = get_global_qdrant_store()
+
+# Search knowledge records
+results = store.search("computer science mentors", limit=3)
+for doc, score in results:
+    print(f"[{score:.2f}] {doc['title']}: {doc['summary']}")
+```
+
+### 3. Ingesting Institutional Data
+
+Place your Excel spreadsheets (`.xlsx`) in `rag_knowledge/data/raw/`:
+- Nominal roll lists
+- UID mappings
+- Student master lists
+
+Preview ingestion without writing to the database (dry run):
+```bash
+python -m rag_knowledge.ingestion.ingest --dry-run
+python -m rag_knowledge.ingestion.ingest --dry-run --limit 5
+```
+
+Perform live upsert to Qdrant Cloud:
+```bash
+python -m rag_knowledge.ingestion.ingest
 ```
 
 ---
 
-## Configuration & Environment Variables
+## Key Features Explained
 
-Add these to your `.env` file or environment:
+### 1. Hybrid Search (Semantic + Exact Match)
+Queries undergo a two-phase lookup:
+1. **Semantic Vector Search**: Uses FastEmbed's `BAAI/bge-small-en-v1.5` (384 dimensions) to find relevant records based on meaning (`score >= 0.45`).
+2. **Exact Identifier Boosting**: Detects roll numbers or IDs (e.g., `2630BTECH0121`) and boosts exact matches to a score of `100.0`, ensuring 100% precision for ID lookups.
+3. **Runner-Up Gap Guard**: If an exact match is found, weaker semantic runner-ups are suppressed to avoid confusing the conversational synthesizer.
 
-| Variable | Required | Default | Description |
-| :--- | :--- | :--- | :--- |
-| `MONGODB_URI` | Yes (for DB) | *(None)* | MongoDB Atlas or local connection string (`mongodb+srv://...`). |
-| `MONGODB_DB_NAME` | No | `riva_knowledge` | Target database name. |
-| `MONGODB_COLLECTION` | No | `knowledge_documents` | Target collection name. |
-| `MONGODB_TIMEOUT_MS` | No | `5000` | Connection and socket timeout in milliseconds. |
-| `MONGODB_DNS_SERVERS` | No | `8.8.8.8,1.1.1.1,8.8.4.4` | Fallback public DNS servers for `mongodb+srv://` SRV resolution. |
-| `MONGODB_DNS_FALLBACK` | No | `1` | Set to `0` to disable the DNS fallback override. |
-| `MONGODB_DISABLE_DNS_OVERRIDE` | No | `0` | Set to `1` to disable the DNS fallback override. |
-| `GEMINI_API_KEY` | No (has fallback) | *(None)* | Google AI Studio API key. Sent securely in `x-goog-api-key` header. If unset, returns raw structured facts. |
-| `GEMINI_RAG_MODEL` | No | *(None)* | Specific Gemini model for RAG synthesis. Takes precedence over `GEMINI_MODEL`. |
-| `GEMINI_MODEL` | No | `gemini-flash-lite-latest` | Model ID for RAG response synthesis (`gemini-flash-lite-latest`, `gemini-3-flash-preview`). |
-| `GEMINI_TIMEOUT` | No | `4.0` | API request timeout in seconds (optimized for voice latency). |
-| `RAG_LOAD_CWD_ENV` | No | `false` | Set to `true` to allow auto-loading `.env` from the current working directory. |
+### 2. Built-in Privacy Guard
+Before records are embedded and stored in Qdrant:
+- Highly sensitive fields (such as Father's Name, personal gender markers, and admission remarks) are stripped out of the public vector embedding payload.
+- Namesake ambiguity protection automatically drops name-only lookups for duplicate names to avoid confusing two students with the same name.
+- Raw spreadsheet files in `rag_knowledge/data/raw/` are strictly gitignored and never committed.
 
----
-
-## Adding or Modifying Knowledge
-
-Documents are stored in MongoDB collection `knowledge_documents`. Each document follows this format:
-
-```json
-{
-  "_id": "person_or_topic_id",
-  "id": "person_or_topic_id",
-  "title": "Full Name / Title",
-  "aliases": ["alias 1", "alias 2"],
-  "keywords": ["keyword1", "keyword2"],
-  "summary": "Short one-sentence summary.",
-  "content": "Detailed facts and background information to be used as context.",
-  "is_active": true
-}
-```
-
-New or modified documents in MongoDB are immediately queryable without restarting applications.
+### 3. Dual Resilient Fallbacks
+- **Missing or Rate-Limited Gemini**: If `GEMINI_API_KEY` is not provided or Gemini hits a quota, the system falls back to returning the verified factual summary directly. Conversations never crash.
+- **Database Offline**: If Qdrant Cloud is unreachable, a friendly notification (`"The knowledge database is currently unavailable. Please try again shortly."`) is returned with no uncaught exceptions.
 
 ---
 
 ## Running Tests
 
-The test suite is fully isolated under `rag_knowledge/tests/`:
+The test suite is **100% hermetic**: tests mock all external network calls and Qdrant connections, requiring no live API keys or cloud credentials.
 
+Run all tests:
 ```bash
-python -m pytest rag_knowledge/tests/ -v
+pytest rag_knowledge/tests/ -v
 ```
+
+Or using `uv`:
+```bash
+uv run pytest rag_knowledge/tests/ -v
+```
+
+All 36 unit tests should pass with zero configuration.
+
+---
+
+## Troubleshooting
+
+| Issue | What Happened | How to Fix |
+| :--- | :--- | :--- |
+| **"The knowledge database is currently unavailable"** | Could not connect to Qdrant Cloud. | Check `QDRANT_URL` and `QDRANT_API_KEY` in your `.env` file. Verify internet connectivity. |
+| **Direct summary returned instead of conversational answer** | `GEMINI_API_KEY` is missing or invalid. | Add a valid key from [Google AI Studio](https://aistudio.google.com/) to your `.env`. |
+| **First run takes a few seconds** | FastEmbed is downloading the ONNX embedding model (~130 MB). | Allow it to complete once. Subsequent runs load instantly from local cache. |
+| **"No valid Excel datasets found" during ingestion** | Raw `.xlsx` files are missing from `data/raw/`. | Place your spreadsheets in `rag_knowledge/data/raw/` or pass `--source <path>`. |

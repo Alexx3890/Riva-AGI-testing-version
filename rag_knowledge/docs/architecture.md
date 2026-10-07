@@ -23,20 +23,20 @@ This document describes the internal design of the `rag_knowledge` subsystem.
               |                                     |
               v                                     v
   +-----------------------+             +-----------------------+
-  |  MongoDB Database     |             |  Google Gemini API    |
-  | (knowledge_documents) |             | (generativelanguage)  |
+  | Qdrant Vector Store   |             |  Google Gemini API    |
+  | (qdrant_storage.py)   |             | (generativelanguage)  |
   +-----------------------+             +-----------------------+
 ```
 
 ## Components
 
-### 1. `KnowledgeRetriever` (`retriever.py`)
-- Database-backed search engine querying MongoDB collection `knowledge_documents`.
-- Weighted full-text search indexing on `aliases` (10x), `title` (8x), `keywords` (5x), `summary` (3x), and `content` (1x).
-- Low-latency token & regex alias lookup fallback with word boundaries and stopwords filtering.
+### 1. `KnowledgeRetriever` (`retrieval/retriever.py`)
+- Vector-backed semantic retrieval engine querying Qdrant Cloud or local Qdrant collection.
+- Dense embeddings generated with FastEmbed (`BAAI/bge-small-en-v1.5`), paired with exact alias/roll/UID scoring.
+- Hybrid token and exact match ranking with reciprocal rank fusion (RRF).
 - Returns top-k matching documents ranked by relevance score.
 
-### 2. `GeminiRAGClient` (`gemini_client.py`)
+### 2. `GeminiRAGClient` (`clients/gemini_client.py`)
 - Communicates directly with Google Generative Language REST API (`models/{model}:generateContent`).
 - Uses standard library `urllib.request` inside an async worker executor to ensure zero event loop blocking and zero third-party dependencies.
 - Injects a voice-tuned prompt directing Gemini to answer within 2–3 spoken sentences strictly grounded in retrieved facts.

@@ -3,8 +3,8 @@
 import asyncio
 import logging
 from typing import Optional
-from rag_knowledge.retriever import KnowledgeRetriever
-from rag_knowledge.gemini_client import GeminiRAGClient
+from .retrieval.retriever import KnowledgeRetriever
+from .clients.gemini_client import GeminiRAGClient
 
 logger = logging.getLogger("rag.service")
 
@@ -39,14 +39,13 @@ class RAGService:
             return "Please specify what you would like to know about."
 
         # 1. Retrieve relevant knowledge documents without blocking event loop
-        store_available = self.retriever.store.is_available()
         if pre_retrieved is not None:
             results = pre_retrieved
         else:
             results = await asyncio.to_thread(self.retriever.retrieve, clean_q, top_k=2)
 
         if not results:
-            if not store_available:
+            if not self.retriever.store.is_available():
                 logger.warning("Knowledge database is unreachable for query: '%s'", clean_q)
                 return "The knowledge database is currently unavailable. Please try again shortly."
             logger.info("No RAG results found for query: '%s'", clean_q)
@@ -56,8 +55,20 @@ class RAGService:
         logger.info(f"Retrieved top match: '{top_doc.get('title')}' (score={top_doc.get('score')})")
 
         # 2. Build reference context
+        # If runner-up score gap is narrow (< 6.0) without high confidence (< 95.0),
+        # only pass the top match to prevent runner-up bleed across similar names.
+        docs_to_use = [results[0]]
+        if len(results) > 1:
+            top_score = float(results[0].get("score", 0.0))
+            runner_score = float(results[1].get("score", 0.0))
+            gap = top_score - runner_score
+            if gap >= 6.0 or top_score >= 95.0:
+                for doc in results[1:]:
+                    if float(doc.get("score", 0.0)) >= top_score * 0.90:
+                        docs_to_use.append(doc)
+
         context_parts = []
-        for doc in results:
+        for doc in docs_to_use:
             context_parts.append(f"Title: {doc.get('title')}\nDetails: {doc.get('content')}")
         context = "\n\n".join(context_parts)
 
