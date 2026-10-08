@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [master, main]
+
+permissions:
+  contents: read
+
+jobs:
+  python-tests:
+    name: Python tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            rag_knowledge/requirements.txt
+            voice_speech/requirements.txt
+      - name: Install test dependencies
+        run: python -m pip install --upgrade pip && python -m pip install -r requirements.txt -r rag_knowledge/requirements.txt -r voice_speech/requirements.txt
+      - name: Run offline test suite
+        run: python -m pytest tests/unit rag_knowledge/tests voice_speech/tests
+
+  container-build:
+    name: Container build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build voice gateway image
+        run: docker build --tag riva-voice-gateway:ci .
