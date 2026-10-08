@@ -12,11 +12,6 @@ _pkg_root = str(Path(__file__).resolve().parent.parent.parent)
 if _pkg_root not in sys.path:
     sys.path.insert(0, _pkg_root)
 
-try:
-    import pytest
-except ImportError:
-    pytest = None
-
 from observability.context import clear_context, get_request_id
 from observability.middleware import RequestIDAndLoggingMiddleware
 
@@ -35,7 +30,7 @@ class DummyRequest:
         self.headers = headers or {}
 
 
-async def async_test_request_id_middleware_injects_header():
+async def _run_request_id_middleware_injects_header():
     """Verify middleware injects X-Request-ID and cleans up context."""
     middleware = RequestIDAndLoggingMiddleware(app=None)
     request = DummyRequest(path="/health", method="GET")
@@ -55,7 +50,7 @@ async def async_test_request_id_middleware_injects_header():
     assert get_request_id() is None
 
 
-async def async_test_request_id_middleware_preserves_incoming_header():
+async def _run_request_id_middleware_preserves_incoming_header():
     """Verify middleware respects an incoming X-Request-ID."""
     middleware = RequestIDAndLoggingMiddleware(app=None)
     request = DummyRequest(
@@ -72,18 +67,17 @@ async def async_test_request_id_middleware_preserves_incoming_header():
     assert response.headers["X-Request-ID"] == "client-trace-12345"
 
 
-# Pytest wrappers if pytest is present
-if pytest:
-    @pytest.mark.asyncio
-    async def test_request_id_middleware_injects_header():
-        await async_test_request_id_middleware_injects_header()
+def test_request_id_middleware_injects_header():
+    """Synchronous test runner compatible with vanilla pytest without async plugins."""
+    asyncio.run(_run_request_id_middleware_injects_header())
 
-    @pytest.mark.asyncio
-    async def test_request_id_middleware_preserves_incoming_header():
-        await async_test_request_id_middleware_preserves_incoming_header()
+
+def test_request_id_middleware_preserves_incoming_header():
+    """Synchronous test runner compatible with vanilla pytest without async plugins."""
+    asyncio.run(_run_request_id_middleware_preserves_incoming_header())
 
 
 if __name__ == "__main__":
-    asyncio.run(async_test_request_id_middleware_injects_header())
-    asyncio.run(async_test_request_id_middleware_preserves_incoming_header())
+    test_request_id_middleware_injects_header()
+    test_request_id_middleware_preserves_incoming_header()
     print("Voice speech observability tests passed successfully!")
