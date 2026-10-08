@@ -7,6 +7,9 @@ services:
     environment:
       PORT: 8000
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      LOG_FORMAT: ${LOG_FORMAT:-json}
+      SERVICE_NAME: ${SERVICE_NAME:-riva-voice-gateway}
+      ENVIRONMENT: ${ENVIRONMENT:-development}
     ports:
       - "8000:8000"
     restart: unless-stopped
