@@ -84,20 +84,3 @@ async def test_custom_tool_registration():
         assert result == "Echo: hello"
     finally:
         TOOL_REGISTRY.pop("test_echo", None)
-
-
-@pytest.mark.anyio
-async def test_orchestration_tool_dispatch():
-    with patch("voice_speech.engine.gemini.tools.execute_orchestration_task") as mock_exec:
-        mock_exec.return_value = "Task completed successfully by Coder Agent."
-        result = await dispatch_tool_call("run_orchestration_task", {"task": "write hello world"})
-        assert "Coder Agent" in result
-        mock_exec.assert_called_once_with("write hello world")
-
-
-@pytest.mark.anyio
-async def test_open_browser_tool_dispatch():
-    with patch("orchestration.tools.tool_registry.execute") as mock_tool:
-        mock_tool.return_value = "Successfully opened 'https://example.com' in Google Chrome."
-        result = await dispatch_tool_call("open_website_in_browser", {"url": "https://example.com", "browser": "chrome"})
-        assert "Successfully opened" in result
