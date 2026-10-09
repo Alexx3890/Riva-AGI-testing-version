@@ -1691,16 +1691,23 @@ def main():
     if source_dir is None:
         source_dir = raw_path
 
-    total = run_ingestion(
-        source_dir=source_dir,
-        dry_run=args.dry_run,
-        limit=args.limit,
-        batch_size=args.batch_size,
-        data_type=args.type,
-        redact=args.redact,
-        allow_cloud_vision=args.cloud_vision,
-    )
-    if not args.dry_run and total == 0:
+    try:
+        total = run_ingestion(
+            source_dir=source_dir,
+            dry_run=args.dry_run,
+            limit=args.limit,
+            batch_size=args.batch_size,
+            data_type=args.type,
+            redact=args.redact,
+            allow_cloud_vision=args.cloud_vision,
+        )
+        if not args.dry_run and total == 0:
+            sys.exit(1)
+    except PrivacyGateError as pge:
+        print(f"\n[ERROR] Ingestion blocked by Privacy Gate:")
+        print(f"{pge}")
+        print(f"\nTo automatically redact detected contact details before upserting, re-run with --redact:")
+        print(f"  .venv\\Scripts\\python.exe -m rag_knowledge.ingestion --source \"{raw_source}\" --redact\n")
         sys.exit(1)
 
 
