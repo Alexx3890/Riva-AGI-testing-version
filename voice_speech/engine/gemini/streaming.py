@@ -59,6 +59,17 @@ async def mic_to_gemini(
             except asyncio.TimeoutError:
                 continue
 
+            # Drop microphone audio while a tool call is resolving to prevent Gemini 1011 race condition
+            if state.is_tool_executing:
+                state.mic_queue.task_done()
+                while not state.mic_queue.empty():
+                    try:
+                        state.mic_queue.get_nowait()
+                        state.mic_queue.task_done()
+                    except asyncio.QueueEmpty:
+                        break
+                continue
+
             # Batch-drain all pending chunks for minimal latency
             chunks = [pcm_bytes]
             while not state.mic_queue.empty():
@@ -123,18 +134,23 @@ async def gemini_to_browser(
                 # 1. Tool Calling Dispatch via Extensible Registry
                 tool_call = getattr(response, "tool_call", None)
                 if tool_call and getattr(tool_call, "function_calls", None):
-                    function_responses = []
-                    for fc in tool_call.function_calls:
-                        result_str = await dispatch_tool_call(fc.name, fc.args or {})
-                        function_responses.append(
-                            types.FunctionResponse(id=fc.id, name=fc.name, response={"result": result_str})
-                        )
-                    if function_responses:
-                        try:
-                            await session.send_tool_response(function_responses=function_responses)
-                            logger.info(f"Delivered {len(function_responses)} tool response(s) to Gemini.")
-                        except Exception as tool_err:
-                            logger.error(f"Error delivering tool response: {tool_err}", exc_info=True)
+                    state.is_tool_executing = True
+                    await state.safe_send_json(websocket, {"type": "state", "state": "THINKING"})
+                    try:
+                        function_responses = []
+                        for fc in tool_call.function_calls:
+                            result_str = await dispatch_tool_call(fc.name, fc.args or {})
+                            function_responses.append(
+                                types.FunctionResponse(id=fc.id, name=fc.name, response={"result": result_str})
+                            )
+                        if function_responses:
+                            try:
+                                await session.send_tool_response(function_responses=function_responses)
+                                logger.info(f"Delivered {len(function_responses)} tool response(s) to Gemini.")
+                            except Exception as tool_err:
+                                logger.error(f"Error delivering tool response: {tool_err}", exc_info=True)
+                    finally:
+                        state.is_tool_executing = False
 
                 server_content = response.server_content
                 if server_content is None:

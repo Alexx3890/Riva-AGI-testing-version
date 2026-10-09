@@ -21,6 +21,7 @@ class ConversationState:
     persona: Optional[AgentPersona] = None
     mic_queue: asyncio.Queue = field(default_factory=lambda: asyncio.Queue(maxsize=30))
     ws_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    is_tool_executing: bool = False
 
     def advance_epoch(self) -> int:
         """Increments the epoch counter on barge-in to invalidate obsolete playback buffers."""

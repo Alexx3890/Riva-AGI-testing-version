@@ -7,6 +7,7 @@ from voice_speech.engine.gemini.tools import (
     fetch_news_summary,
     TOOL_REGISTRY,
     NEWS_TOOL_DECLARATION,
+    KNOWLEDGE_TOOL_DECLARATION,
 )
 
 
@@ -14,6 +15,12 @@ def test_tool_declaration():
     assert NEWS_TOOL_DECLARATION.name == "get_latest_news"
     assert "query" in NEWS_TOOL_DECLARATION.parameters.properties
     assert "query" in NEWS_TOOL_DECLARATION.parameters.required
+
+
+def test_knowledge_tool_declaration():
+    assert KNOWLEDGE_TOOL_DECLARATION.name == "query_knowledge_base"
+    assert "query" in KNOWLEDGE_TOOL_DECLARATION.parameters.properties
+    assert "query" in KNOWLEDGE_TOOL_DECLARATION.parameters.required
 
 
 @pytest.mark.anyio
@@ -101,3 +108,12 @@ async def test_open_browser_tool_dispatch():
         mock_tool.return_value = "Successfully opened 'https://example.com' in Google Chrome."
         result = await dispatch_tool_call("open_website_in_browser", {"url": "https://example.com", "browser": "chrome"})
         assert "Successfully opened" in result
+
+
+@pytest.mark.anyio
+async def test_knowledge_tool_dispatch():
+    with patch("rag_knowledge.query_rag") as mock_query:
+        mock_query.return_value = "Verified fact from KIET knowledge base."
+        result = await dispatch_tool_call("query_knowledge_base", {"query": "NextGen club details"})
+        assert "Verified fact" in result
+        mock_query.assert_called_once_with("NextGen club details")

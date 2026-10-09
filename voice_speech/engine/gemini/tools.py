@@ -180,9 +180,24 @@ OPEN_BROWSER_TOOL_DECLARATION = types.FunctionDeclaration(
     ),
 )
 
+KNOWLEDGE_TOOL_DECLARATION = types.FunctionDeclaration(
+    name="query_knowledge_base",
+    description=(
+        "Query the institutional RAG knowledge base for verified information regarding "
+        "students, candidates, rosters, admissions, waiting lists, attendance, university events, "
+        "campus policies, schedules, faculty, courses, or club activities at K.I.E.T / NextGen."
+    ),
+    parameters=types.Schema(
+        type="OBJECT",
+        properties={"query": types.Schema(type="STRING", description="Search query or question regarding K.I.E.T or NextGen knowledge")},
+        required=["query"],
+    ),
+)
+
 DEFAULT_TOOLS: List[types.Tool] = [
     types.Tool(function_declarations=[
         NEWS_TOOL_DECLARATION,
+        KNOWLEDGE_TOOL_DECLARATION,
         ORCHESTRATION_TOOL_DECLARATION,
         OPEN_BROWSER_TOOL_DECLARATION,
     ])
@@ -266,9 +281,22 @@ async def _handle_open_website_in_browser(args: Dict[str, Any]) -> str:
         return f"Error opening browser: {str(e)}"
 
 
+async def _handle_query_knowledge_base(args: Dict[str, Any]) -> str:
+    query = str((args or {}).get("query", "")).strip()
+    if not query:
+        return "Please specify a query to search the knowledge base."
+    try:
+        from rag_knowledge import query_rag
+        return await query_rag(query)
+    except Exception as e:
+        logger.error(f"Error querying RAG knowledge base: {e}", exc_info=True)
+        return f"Could not retrieve knowledge base information: {str(e)}"
+
+
 # Extensible Tool Handler Registry
 TOOL_REGISTRY: Dict[str, Callable[[Dict[str, Any]], Awaitable[str]]] = {
     "get_latest_news": _handle_get_latest_news,
+    "query_knowledge_base": _handle_query_knowledge_base,
     "run_orchestration_task": _handle_run_orchestration_task,
     "open_website_in_browser": _handle_open_website_in_browser,
 }
