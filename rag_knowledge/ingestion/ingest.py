@@ -1624,7 +1624,7 @@ def main():
         help="Delete all documents from the Qdrant Cloud collection and reset it empty",
     )
     parser.add_argument(
-        "--yes", "-y",
+        "--yes", "-y", "-yes",
         action="store_true",
         help="Confirm destructive operations such as --clear without interactive prompt",
     )
