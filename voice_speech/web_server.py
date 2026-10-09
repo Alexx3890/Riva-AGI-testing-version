@@ -1,14 +1,15 @@
 """
 Riva WebSocket Voice Gateway Server (FastAPI + Web Audio Worklet).
 Clean, modular bridge routing between browser Web Audio and Gemini Live API.
+Integrated with structured JSON logging, request IDs, and operational metrics.
 """
 
-import logging
 import os
 import sys
+import time
 from pathlib import Path
 
-# Ensure parent directory is in sys.path for voice_speech package imports
+# Ensure parent directory is in sys.path for voice_speech & observability package imports
 _pkg_root = str(Path(__file__).resolve().parent.parent)
 if _pkg_root not in sys.path:
     sys.path.insert(0, _pkg_root)
@@ -16,19 +17,23 @@ if _pkg_root not in sys.path:
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, Response
 
+from observability import (
+    RequestIDAndLoggingMiddleware,
+    clear_context,
+    get_logger,
+    metrics,
+    set_session_id,
+    setup_logging,
+)
 from voice_speech.engine.config.settings import Settings
 from voice_speech.engine.conversation.session_manager import SessionManager
 from voice_speech.engine.conversation.state import ConversationState
 from voice_speech.engine.gemini.session import create_gemini_client
 from voice_speech.engine.gemini.streaming import run_live_bridge
 
-# Setup logging
-logging.basicConfig(
-    level=getattr(logging, os.getenv("LOG_LEVEL", "INFO").upper(), logging.INFO),
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    datefmt="%H:%M:%S",
-)
-logger = logging.getLogger("riva.web_server")
+# Setup structured observability logging
+setup_logging(service_name="riva-voice-gateway")
+logger = get_logger("riva.web_server")
 
 # Load unified settings
 settings = Settings()
@@ -47,6 +52,9 @@ session_manager = SessionManager()
 
 app = FastAPI(title="Riva Voice Gateway")
 
+# Register Request ID and structured HTTP logging middleware
+app.add_middleware(RequestIDAndLoggingMiddleware)
+
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 WEB_DIR = os.path.join(BASE_DIR, "web")
 
@@ -54,12 +62,30 @@ WEB_DIR = os.path.join(BASE_DIR, "web")
 @app.get("/health", tags=["operations"])
 async def health_check():
     """Lightweight liveness endpoint for container and platform probes."""
+    sys_metrics = metrics.get_metrics_json().get("system", {})
     return {
         "status": "ok",
         "service": "riva-voice-gateway",
+        "version": os.getenv("APP_VERSION", "0.1.0"),
+        "uptime_seconds": sys_metrics.get("uptime_seconds"),
         "active_sessions": session_manager.active_sessions,
         "max_concurrent_sessions": session_manager.max_concurrent_sessions,
     }
+
+
+@app.get("/metrics", tags=["operations"])
+async def get_prometheus_metrics():
+    """Prometheus exposition format metrics endpoint for scrapers and Grafana."""
+    return Response(
+        content=metrics.get_prometheus_metrics(),
+        media_type="text/plain; version=0.0.4; charset=utf-8",
+    )
+
+
+@app.get("/metrics/json", tags=["operations"])
+async def get_json_metrics():
+    """Structured JSON operational metrics for quick inspection and dashboards."""
+    return metrics.get_metrics_json()
 
 
 # Static Web UI Routes
@@ -111,9 +137,21 @@ async def audio_websocket_endpoint(websocket: WebSocket):
 
     voice = websocket.query_params.get("voice") or "Aoede"
     language = websocket.query_params.get("language") or "auto"
+    custom_sid = websocket.headers.get("X-Session-ID") or websocket.query_params.get("session_id")
+    sess_id = set_session_id(custom_sid)
+
+    metrics.record_ws_session_start(voice=voice, language=language)
+    ws_start_time = time.time()
+
     logger.info(
         f"Browser client connected to /ws (voice={voice}, language={language}) "
-        f"[{session_manager.active_sessions}/{session_manager.max_concurrent_sessions} sessions]"
+        f"[{session_manager.active_sessions}/{session_manager.max_concurrent_sessions} sessions]",
+        extra={
+            "session_id": sess_id,
+            "voice": voice,
+            "language": language,
+            "active_sessions": session_manager.active_sessions,
+        },
     )
 
     state = ConversationState()
@@ -129,12 +167,20 @@ async def audio_websocket_endpoint(websocket: WebSocket):
             language=language,
         )
     except WebSocketDisconnect:
-        logger.info("Browser client disconnected cleanly.")
+        logger.info("Browser client disconnected cleanly.", extra={"session_id": sess_id})
     except Exception as e:
-        logger.error(f"WebSocket bridge exception: {e}", exc_info=True)
+        metrics.record_error(error_class=e.__class__.__name__, route="/ws")
+        logger.error(f"WebSocket bridge exception: {e}", exc_info=True, extra={"session_id": sess_id})
     finally:
         state.terminate()
         await session_manager.release()
+        session_duration = time.time() - ws_start_time
+        metrics.record_ws_session_end(duration_s=session_duration)
+        logger.info(
+            f"WebSocket session closed after {session_duration:.2f}s",
+            extra={"session_id": sess_id, "duration_s": round(session_duration, 2)},
+        )
+        clear_context()
 
 
 if __name__ == "__main__":
