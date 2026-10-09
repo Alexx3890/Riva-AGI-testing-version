@@ -10,6 +10,7 @@ Set your credentials in `.env` (see `.env.example`):
 
 ```ini
 GEMINI_API_KEY=your_gemini_api_key
+GEMINI_VISION_API_KEY=your_gemini_vision_api_key  # Optional dedicated key for vision OCR
 QDRANT_URL=https://your-cluster-id.cloud.qdrant.io
 QDRANT_API_KEY=your_qdrant_api_key
 QDRANT_COLLECTION=riva_knowledge

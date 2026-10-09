@@ -26,7 +26,8 @@ def get_default_gemini_model() -> str:
     except ImportError:
         pass
     return (
-        os.getenv("GEMINI_RAG_MODEL", "").strip()
+        os.getenv("GEMINI_TEXT_MODEL", "").strip()
+        or os.getenv("GEMINI_RAG_MODEL", "").strip()
         or os.getenv("GEMINI_MODEL", "").strip()
         or os.getenv("GEMINI_DEFAULT_MODEL", "").strip()
     )
@@ -64,11 +65,19 @@ class GeminiRAGClient:
         except ImportError:
             pass
 
-        self.api_key = api_key if api_key is not None else os.getenv("GEMINI_API_KEY", "").strip()
+        self.api_key = (
+            api_key
+            if api_key is not None
+            else (
+                os.getenv("GEMINI_TEXT_API_KEY", "").strip()
+                or os.getenv("GEMINI_RAG_API_KEY", "").strip()
+                or os.getenv("GEMINI_API_KEY", "").strip()
+            )
+        )
         if model is not None:
             self.model = model
         else:
-            rag_model = os.getenv("GEMINI_RAG_MODEL", "").strip()
+            rag_model = os.getenv("GEMINI_TEXT_MODEL", "").strip() or os.getenv("GEMINI_RAG_MODEL", "").strip()
             gen_model = os.getenv("GEMINI_MODEL", "").strip()
             if gen_model and "live" in gen_model.lower():
                 gen_model = ""
