@@ -117,3 +117,13 @@ async def test_knowledge_tool_dispatch():
         result = await dispatch_tool_call("query_knowledge_base", {"query": "NextGen club details"})
         assert "Verified fact" in result
         mock_query.assert_called_once_with("NextGen club details")
+
+
+@pytest.mark.anyio
+async def test_get_latest_news_person_query_fallback():
+    with patch("rag_knowledge.query_rag") as mock_rag:
+        mock_rag.return_value = "Ankit Kumar Singh is a B.Tech student in AI at KIET."
+        result = await dispatch_tool_call("get_latest_news", {"query": "Who is Ankit kumar singh?"})
+        assert "Ankit Kumar Singh is a B.Tech student" in result
+        mock_rag.assert_called_once_with("Who is Ankit kumar singh?")
+

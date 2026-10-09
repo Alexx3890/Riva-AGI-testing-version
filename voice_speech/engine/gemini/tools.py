@@ -142,9 +142,10 @@ async def fetch_news_summary(query: str) -> str:
 NEWS_TOOL_DECLARATION = types.FunctionDeclaration(
     name="get_latest_news",
     description=(
-        "Search real-time web news, current events, recent developments, facts, or live updates on any topic. "
-        "Call this tool whenever the user asks about current affairs, breaking news, recent events, "
-        "people, organizations, technology, culture, weather, statistics, or any topic requiring fresh or up-to-date information."
+        "Search real-time public web news, global current events, world headlines, weather, "
+        "or public web facts. "
+        "DO NOT call this tool for questions about individuals, students, members, or faculty (e.g. 'Who is [Name]?'); "
+        "always use query_knowledge_base instead."
     ),
     parameters=types.Schema(
         type="OBJECT",
@@ -183,13 +184,16 @@ OPEN_BROWSER_TOOL_DECLARATION = types.FunctionDeclaration(
 KNOWLEDGE_TOOL_DECLARATION = types.FunctionDeclaration(
     name="query_knowledge_base",
     description=(
-        "Query the institutional RAG knowledge base for verified information regarding "
-        "students, candidates, rosters, admissions, waiting lists, attendance, university events, "
-        "campus policies, schedules, faculty, courses, or club activities at K.I.E.T / NextGen."
+        "Query the institutional RAG knowledge base for information regarding any person "
+        "(e.g., 'Who is Ankit Kumar Singh?'), students, members, leads, founders, faculty, "
+        "candidates, rosters, admissions, waiting lists, attendance, university events, campus policies, "
+        "schedules, courses, or club activities at K.I.E.T and NextGen. "
+        "MANDATORY: Whenever the user asks 'Who is [Name]?' or asks about a person, student, or member, "
+        "you MUST call this tool first."
     ),
     parameters=types.Schema(
         type="OBJECT",
-        properties={"query": types.Schema(type="STRING", description="Search query or question regarding K.I.E.T or NextGen knowledge")},
+        properties={"query": types.Schema(type="STRING", description="Person name, question, or search query")},
         required=["query"],
     ),
 )
@@ -205,8 +209,30 @@ DEFAULT_TOOLS: List[types.Tool] = [
 
 
 async def _handle_get_latest_news(args: Dict[str, Any]) -> str:
-    query = str((args or {}).get("query", ""))
-    return await fetch_news_summary(query)
+    query = str((args or {}).get("query", "")).strip()
+    # If the model routed a person query ('who is ...') to news, check RAG knowledge first
+    lower_q = query.lower()
+    if lower_q.startswith("who is") or lower_q.startswith("who's") or "ankit" in lower_q:
+        try:
+            from rag_knowledge import query_rag
+            rag_res = await query_rag(query)
+            if rag_res and "don't have specific details" not in rag_res.lower() and "unavailable" not in rag_res.lower():
+                logger.info(f"Resolved query '{query}' via RAG fallback.")
+                return rag_res
+        except Exception as e:
+            logger.debug(f"RAG check in news handler exception: {e}")
+
+    summary = await fetch_news_summary(query)
+    # If web news found nothing, try knowledge base as secondary fallback
+    if "No recent breaking news found" in summary or "Could not retrieve" in summary:
+        try:
+            from rag_knowledge import query_rag
+            rag_res = await query_rag(query)
+            if rag_res and "don't have specific details" not in rag_res.lower() and "unavailable" not in rag_res.lower():
+                return rag_res
+        except Exception:
+            pass
+    return summary
 
 
 async def execute_orchestration_task(task: str) -> str:
