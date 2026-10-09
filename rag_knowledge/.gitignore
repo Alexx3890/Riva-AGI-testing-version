@@ -7,3 +7,10 @@
 __pycache__/
 *.py[cod]
 *$py.class
+
+# Local documentation
+docs/
+
+# Student data files — never commit; gitkeep preserves the empty dir in checkout
+data/*
+!data/raw/.gitkeep

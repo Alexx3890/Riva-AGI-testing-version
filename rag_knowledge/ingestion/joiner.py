@@ -1,0 +1,332 @@
+"""Pre-Ingestion Student Entity Joiner.
+
+Joins disjoint student records from:
+- UID mapping (UID, Name, Gender, Batch Name, Father Name)
+- Nominal Roll (Student UID, Name, Sem, Sec, Phone, Email, Father Name, Mentor)
+- Master Student List (Display Name, Degree, Branch, Batch, Year, Section, Roll Number, Status)
+
+into unified canonical student entities before the declarative dataset mapping runs.
+Protects against namesake collisions, isolates private values, and generates opaque entity references.
+"""
+
+from collections import Counter
+import hashlib
+import logging
+import re
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Set, Tuple
+
+import openpyxl
+
+logger = logging.getLogger("rag.ingest.joiner")
+
+
+def normalize_clean_str(text: Optional[Any]) -> str:
+    """Collapses whitespace and trims text."""
+    if text is None:
+        return ""
+    return re.sub(r"\s+", " ", str(text)).strip()
+
+
+def clean_identifier(val: Optional[Any]) -> str:
+    """Sanitizes an alphanumeric identifier (uppercase, stripped)."""
+    if val is None:
+        return ""
+    return re.sub(r"[^A-Za-z0-9]", "", str(val)).upper()
+
+
+def normalize_person_name(name: str) -> str:
+    """Normalizes person name to Title Case for consistent join matching."""
+    clean = normalize_clean_str(name)
+    if not clean:
+        return ""
+    parts = clean.split(" ")
+    capitalized = []
+    for p in parts:
+        if p.upper() in {"I", "II", "III", "IV", "CSE", "CSIT", "IT", "ECE", "ME", "AIML", "AI"}:
+            capitalized.append(p.upper())
+        else:
+            capitalized.append(p.capitalize())
+    return " ".join(capitalized)
+
+
+def make_opaque_ref_id(primary_key: str) -> str:
+    """Creates a deterministic, non-reversible synthetic reference ID."""
+    digest = hashlib.sha256(f"riva_entity_ref:{primary_key}".encode("utf-8")).hexdigest()
+    return f"ref_{digest[:16]}"
+
+
+class StudentEntityJoiner:
+    """Merges disparate student spreadsheets into canonical, deduplicated entities."""
+
+    def __init__(self, data_dir: Path) -> None:
+        self.data_dir = Path(data_dir)
+        self.canonical_students: List[Dict[str, Any]] = []
+        self.safe_identifiers: Set[str] = set()
+        self.known_private_values: Set[str] = set()
+
+    def build_joined_students(self) -> List[Dict[str, Any]]:
+        """Loads and merges student datasets with strict namesake protection."""
+        uid_file = self.data_dir / "UID.xlsx"
+        nom_files = list(self.data_dir.glob("*Nominal*.xlsx"))
+        master_files = list(self.data_dir.glob("*STUDENT*.xlsx"))
+
+        uid_map = self._load_uid_file(uid_file) if uid_file.exists() else {}
+        nom_map = self._load_nominal_roll(nom_files[0]) if nom_files else {}
+        master_list = self._load_master_list(master_files[0]) if master_files else []
+
+        # Build in-memory lookup indices for Master List with namesake protection
+        name_counts = Counter(m["name"].upper() for m in master_list if m.get("name"))
+        master_by_roll: Dict[str, Dict[str, Any]] = {}
+        master_by_email: Dict[str, Dict[str, Any]] = {}
+        master_by_unique_name: Dict[str, Dict[str, Any]] = {}
+
+        for m in master_list:
+            roll = m["roll_number"]
+            name_u = m["name"].upper()
+            email = m.get("in_memory_email", "").strip().lower()
+
+            if roll:
+                master_by_roll[roll] = m
+                self.safe_identifiers.add(roll)
+
+            if email and "@" in email and email not in master_by_email:
+                master_by_email[email] = m
+
+            # Only index by name if strictly unique across the dataset
+            if name_u and name_counts[name_u] == 1:
+                master_by_unique_name[name_u] = m
+
+        matched_both_count = 0
+        merged_entities: Dict[str, Dict[str, Any]] = {}
+        processed_master_rolls: Set[str] = set()
+
+        # Phase 1: Unify by UID (from UID.xlsx and Nominal Roll)
+        all_uids = set(uid_map.keys()) | set(nom_map.keys())
+        for uid in sorted(all_uids):
+            self.safe_identifiers.add(uid)
+            u_info = uid_map.get(uid, {})
+            n_info = nom_map.get(uid, {})
+
+            display_name = n_info.get("name") or u_info.get("name") or ""
+            name_u = display_name.upper()
+            nom_email = n_info.get("in_memory_email", "").strip().lower()
+
+            # Attempt matching to Master List: 1. By unique Email, 2. By unique Name
+            matched_master = None
+            if nom_email and nom_email in master_by_email:
+                matched_master = master_by_email[nom_email]
+            elif name_u and name_u in master_by_unique_name:
+                matched_master = master_by_unique_name[name_u]
+
+            roll = matched_master["roll_number"] if matched_master else ""
+            if roll:
+                processed_master_rolls.add(roll)
+                matched_both_count += 1
+
+            # Extract fields without inventing facts
+            branch = (matched_master.get("branch") if matched_master else "") or u_info.get("batch_name", "")
+            degree = matched_master.get("degree", "") if matched_master else ""
+            batch = (matched_master.get("academic_batch") if matched_master else "") or ""
+            year = matched_master.get("year", "") if matched_master else ""
+            sec = n_info.get("section") or (matched_master.get("section", "") if matched_master else "")
+            sem = n_info.get("sem", "")
+            mentor = n_info.get("mentor", "")
+            status = matched_master.get("admission_status", "ACTIVE") if matched_master else "ACTIVE"
+
+            # Register sensitive values for Privacy Gate inspection in memory
+            for pv in [
+                u_info.get("father_name"),
+                n_info.get("father_name"),
+                u_info.get("gender"),
+                nom_email,
+                n_info.get("phone"),
+            ]:
+                if pv and len(str(pv).strip()) >= 3:
+                    self.known_private_values.add(str(pv).strip())
+
+            ref_id = make_opaque_ref_id(roll or uid)
+
+            entity_record = {
+                "roll_number": roll,
+                "student_uid": uid,
+                "name": display_name,
+                "degree": degree,
+                "branch": branch,
+                "academic_batch": batch,
+                "year": year,
+                "section": sec,
+                "semester": sem,
+                "mentor": mentor,
+                "admission_status": status,
+                "entity_ref_id": ref_id,
+            }
+            merged_entities[ref_id] = entity_record
+
+        # Phase 2: Add remaining master records that didn't match any UID
+        unmatched_master_count = 0
+        for m in master_list:
+            roll = m["roll_number"]
+            if roll and roll in processed_master_rolls:
+                continue
+
+            unmatched_master_count += 1
+            ref_id = make_opaque_ref_id(roll or m["name"])
+            merged_entities[ref_id] = {
+                "roll_number": roll,
+                "student_uid": "",
+                "name": m["name"],
+                "degree": m.get("degree", ""),
+                "branch": m.get("branch", ""),
+                "academic_batch": m.get("academic_batch", ""),
+                "year": m.get("year", ""),
+                "section": m.get("section", ""),
+                "semester": "",
+                "mentor": "",
+                "admission_status": m.get("admission_status", "ACTIVE"),
+                "entity_ref_id": ref_id,
+            }
+
+            # Register master list private values for Privacy Gate
+            for pv in [m.get("phone"), m.get("in_memory_email"), m.get("father_name")]:
+                if pv and len(str(pv).strip()) >= 3:
+                    self.known_private_values.add(str(pv).strip())
+
+        self.canonical_students = list(merged_entities.values())
+        logger.info(
+            f"StudentEntityJoiner compiled {len(self.canonical_students)} students. "
+            f"Both Roll+UID matched: {matched_both_count}, Master-only: {unmatched_master_count}. "
+            f"Safe IDs: {len(self.safe_identifiers)}, Known Private Values: {len(self.known_private_values)}"
+        )
+        return self.canonical_students
+
+    def _load_uid_file(self, path: Path) -> Dict[str, Dict[str, Any]]:
+        wb = openpyxl.load_workbook(path, data_only=True)
+        try:
+            sheet = wb.active or wb.worksheets[0]
+            records = {}
+            for r in list(sheet.iter_rows(values_only=True))[1:]:
+                if not r or len(r) < 6:
+                    continue
+                _, name_raw, father_raw, gender_raw, batch_raw, uid_raw = r[:6]
+                uid = clean_identifier(uid_raw)
+                if not uid or uid.lower() in {"uid", "studentuid", "none"}:
+                    continue
+                records[uid] = {
+                    "uid": uid,
+                    "name": normalize_person_name(name_raw),
+                    "father_name": normalize_clean_str(father_raw),
+                    "gender": normalize_clean_str(gender_raw).upper(),
+                    "batch_name": normalize_clean_str(batch_raw),
+                }
+            return records
+        finally:
+            wb.close()
+
+    def _load_nominal_roll(self, path: Path) -> Dict[str, Dict[str, Any]]:
+        wb = openpyxl.load_workbook(path, data_only=True)
+        try:
+            sheet = wb.active or wb.worksheets[0]
+            rows = list(sheet.iter_rows(values_only=True))
+
+            # Dynamically detect header row by searching for "student uid" or "uid"
+            header_idx = -1
+            col_map: Dict[str, int] = {}
+            for idx, r in enumerate(rows):
+                if not r:
+                    continue
+                row_str = " ".join(str(c).lower() for c in r if c is not None)
+                if "student uid" in row_str or "uid" in row_str:
+                    header_idx = idx
+                    for ci, c in enumerate(r):
+                        if c is not None:
+                            col_map[str(c).strip().lower()] = ci
+                    break
+
+            if header_idx == -1:
+                logger.warning(f"No header with Student UID found in {path.name}")
+                return {}
+
+            records = {}
+            for r in rows[header_idx + 1:]:
+                if not r:
+                    continue
+
+                def _get(col_substr: str) -> str:
+                    for k, ci in col_map.items():
+                        if col_substr in k and ci < len(r) and r[ci] is not None:
+                            return normalize_clean_str(r[ci])
+                    return ""
+
+                uid = clean_identifier(_get("uid"))
+                if not uid:
+                    continue
+
+                records[uid] = {
+                    "student_uid": uid,
+                    "name": normalize_person_name(_get("name")),
+                    "sem": _get("sem"),
+                    "section": _get("sec"),
+                    "phone": _get("phone"),
+                    "in_memory_email": _get("email").lower(),
+                    "father_name": _get("father"),
+                    "mentor": normalize_person_name(_get("mentor")),
+                }
+            return records
+        finally:
+            wb.close()
+
+    def _load_master_list(self, path: Path) -> List[Dict[str, Any]]:
+        wb = openpyxl.load_workbook(path, data_only=True)
+        try:
+            sheet = wb.active or wb.worksheets[0]
+            rows = list(sheet.iter_rows(values_only=True))
+            if not rows:
+                return []
+
+            # Dynamic header mapping
+            col_map: Dict[str, int] = {}
+            header_idx = 0
+            for idx, r in enumerate(rows[:5]):
+                row_str = " ".join(str(c).lower() for c in r if c is not None)
+                if "roll number" in row_str or "roll no" in row_str or "display name" in row_str:
+                    header_idx = idx
+                    for ci, c in enumerate(r):
+                        if c is not None:
+                            col_map[str(c).strip().lower()] = ci
+                    break
+
+            records = []
+            for r in rows[header_idx + 1:]:
+                if not r:
+                    continue
+
+                def _get(col_substr: str) -> str:
+                    for k, ci in col_map.items():
+                        if col_substr in k and ci < len(r) and r[ci] is not None:
+                            return normalize_clean_str(r[ci])
+                    return ""
+
+                roll = clean_identifier(_get("roll"))
+                name = normalize_person_name(_get("name"))
+                if not roll and not name:
+                    continue
+
+                status = _get("status") or "ACTIVE"
+
+                records.append({
+                    "roll_number": roll,
+                    "name": name,
+                    "degree": _get("degree"),
+                    "branch": _get("branch"),
+                    "academic_batch": _get("batch"),
+                    "year": _get("year"),
+                    "section": _get("section"),
+                    "admission_status": status,
+                    "in_memory_email": _get("email").lower(),
+                    "phone": _get("phone"),
+                    "father_name": _get("father"),
+                })
+            return records
+        finally:
+            wb.close()

@@ -1,15 +1,14 @@
-# rag_knowledge Requirements
+# rag_knowledge Runtime Requirements
 # Gemini client and core RAG orchestration use standard Python 3.10+ library (urllib, json, asyncio, re).
-# MongoDB storage requires pymongo, dnspython, and certifi.
+# Vector database storage powered by Qdrant Cloud and FastEmbed (ONNX).
 
-# Optional: Environment variable loading for standalone usage
+# Environment variable loading for standalone usage
 python-dotenv>=1.0.0
 
-# MongoDB Database Backend
-pymongo>=4.6.0
-dnspython>=2.7.0
-certifi>=2024.0.0
+# Qdrant Vector Database & Local Fast Embeddings
+qdrant-client>=1.12.0
+fastembed>=0.4.0
 
-# Development and Testing Dependencies
-pytest>=7.4.0
-anyio>=4.0.0
+# Excel & PDF Data Ingestion Pipeline
+openpyxl>=3.1.0
+pypdf>=5.0.0

@@ -1,29 +1,16 @@
-"""Command-Line Interface for rag_knowledge.
-
-Allows standalone testing and querying of the RAG knowledge base
-independently of any other services.
-
-Usage:
-    python -m rag_knowledge "Do you know about Alex Doe?"
-    python -m rag_knowledge --list
-    python rag_knowledge/cli.py "Who is Alex Doe?"
-"""
+"""CLI for rag_knowledge."""
 
 import argparse
 import asyncio
 import os
 import sys
 
-# Support running directly as a script
-if __package__ is None or __package__ == "":
-    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-from rag_knowledge import load_env
-from rag_knowledge.service import get_rag_service, query_rag
+from . import load_env
+from .service import get_rag_service, query_rag
 
 
 def list_knowledge_entries():
-    """Prints all registered knowledge entries using the shared service retriever."""
+    """List registered knowledge entries."""
     service = get_rag_service()
     docs = service.retriever.documents
     total_str = f"{len(docs)}" if len(docs) < 100 else f"{len(docs)}+ (limit 100 reached)"
@@ -35,12 +22,13 @@ def list_knowledge_entries():
         print()
 
 
-async def run_query(query: str, verbose: bool = False):
-    """Executes a query against the RAG service and prints results."""
+async def run_query(query: str, verbose: bool = True):
+    """Execute a query against the RAG service and display results."""
     service = get_rag_service()
     pre_matches = None
+    cli_top_k = int(os.getenv("RAG_TOP_K", "5"))
     if verbose:
-        pre_matches = await asyncio.to_thread(service.retriever.retrieve, query, top_k=2)
+        pre_matches = await asyncio.to_thread(service.retriever.retrieve, query, top_k=cli_top_k)
         print(f"\n[Retrieval Matches for '{query}']:")
         if pre_matches:
             for idx, m in enumerate(pre_matches, 1):
@@ -62,7 +50,7 @@ def main():
         "query",
         nargs="?",
         default=None,
-        help="Search query or question (e.g. 'Who is Alex Doe?')",
+        help="Search query or question (e.g. 'What events are scheduled?')",
     )
     parser.add_argument(
         "--list",
@@ -72,7 +60,13 @@ def main():
     parser.add_argument(
         "-v", "--verbose",
         action="store_true",
-        help="Print retrieval scoring and matching details",
+        default=True,
+        help="Print retrieval scoring and matching details (enabled by default)",
+    )
+    parser.add_argument(
+        "-q", "--quiet",
+        action="store_true",
+        help="Suppress retrieval ranking matches and print only the final answer",
     )
 
     args = parser.parse_args()
@@ -85,7 +79,8 @@ def main():
         parser.print_help()
         sys.exit(1)
 
-    asyncio.run(run_query(args.query, verbose=args.verbose))
+    show_matches = False if args.quiet else True
+    asyncio.run(run_query(args.query, verbose=show_matches))
 
 
 if __name__ == "__main__":

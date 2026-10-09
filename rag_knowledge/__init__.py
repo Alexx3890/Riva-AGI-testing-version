@@ -8,12 +8,13 @@ from pathlib import Path
 
 
 def load_env() -> None:
-    """Loads environment variables from package .env or project root .env.
+    """Load environment variables from package or root .env file."""
+    if os.getenv("RAG_DISABLE_LOAD_ENV", "").lower() in ("true", "1", "yes"):
+        return
 
-    Prefers python-dotenv if installed, otherwise parses key-value pairs safely.
-    """
     env_paths = [
         Path(__file__).resolve().parent / ".env",
+        Path(__file__).resolve().parent.parent / ".env",
     ]
     if os.getenv("RAG_LOAD_CWD_ENV", "").lower() in ("true", "1", "yes"):
         env_paths.insert(0, Path.cwd() / ".env")
@@ -39,11 +40,9 @@ def load_env() -> None:
                             k, v = line.split("=", 1)
                             key = k.strip()
                             val = v.strip()
-                            # Handle quoted values
                             if (val.startswith('"') and val.endswith('"')) or (val.startswith("'") and val.endswith("'")):
                                 val = val[1:-1]
                             elif " #" in val:
-                                # Strip trailing comment only when preceded by whitespace
                                 val = val.split(" #", 1)[0].strip()
                             if key and key not in os.environ:
                                 os.environ[key] = val
@@ -51,10 +50,14 @@ def load_env() -> None:
                 pass
 
 
-from rag_knowledge.retriever import KnowledgeRetriever
-from rag_knowledge.gemini_client import GeminiRAGClient
-from rag_knowledge.service import RAGService, query_rag, get_rag_service
-from rag_knowledge.storage.mongo import MongoKnowledgeStore
+from .retrieval.retriever import KnowledgeRetriever
+from .clients.gemini_client import GeminiRAGClient
+from .service import RAGService, query_rag, get_rag_service
+from .storage.qdrant_storage import QdrantKnowledgeStore
+from . import clients, ingestion, prompts, retrieval, service, storage
+from .retrieval import retriever
+from .clients import gemini_client
+from .ingestion import ingest
 
 __all__ = [
     "KnowledgeRetriever",
@@ -62,7 +65,15 @@ __all__ = [
     "RAGService",
     "query_rag",
     "get_rag_service",
-    "MongoKnowledgeStore",
+    "QdrantKnowledgeStore",
     "load_env",
+    "clients",
+    "ingestion",
+    "retrieval",
+    "storage",
+    "prompts",
+    "service",
+    "retriever",
+    "gemini_client",
+    "ingest",
 ]
-
