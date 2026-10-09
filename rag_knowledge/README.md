@@ -1,67 +1,72 @@
 # RAG Knowledge Subsystem (`rag_knowledge`)
 
-A modular Retrieval-Augmented Generation (RAG) service providing fast vector lookup via Qdrant and conversational synthesis with Google Gemini.
+Voice-optimized Retrieval-Augmented Generation (RAG) service powered by **Qdrant Vector Database** and **Google Gemini**.
 
 ---
 
-## Quick Setup
+## 1. Setup
 
-1. **Install dependencies:**
-   ```bash
-   pip install -r rag_knowledge/requirements.txt
-   ```
+Set your credentials in `.env` (see `.env.example`):
 
-2. **Configure environment:**
-   Copy `.env.example` to `.env` and set your credentials:
-   ```ini
-   GEMINI_API_KEY=your_gemini_api_key
-   QDRANT_URL=https://your-cluster.qdrant.io
-   QDRANT_API_KEY=your_qdrant_api_key
-   QDRANT_COLLECTION=riva_knowledge
-   ```
+```ini
+GEMINI_API_KEY=your_gemini_api_key
+QDRANT_URL=https://your-cluster-id.cloud.qdrant.io
+QDRANT_API_KEY=your_qdrant_api_key
+QDRANT_COLLECTION=riva_knowledge
+```
+
+Install requirements:
+```bash
+pip install -r rag_knowledge/requirements.txt
+```
 
 ---
 
-## Usage
+## 2. Ingestion (Upload Data)
 
-### In Python
+Ingest files or directories with universal format detection:
+
+```bash
+# Ingest with privacy redaction (recommended)
+python -m rag_knowledge.ingestion --source "path/to/file_or_folder" --redact
+
+# Preview sample documents without writing to cloud
+python -m rag_knowledge.ingestion --source "path/to/file_or_folder" --dry-run
+
+# Wipe the cloud database clean
+python -m rag_knowledge.ingestion --clear
+```
+
+**Supported Formats:**
+- **Spreadsheets**: `.xlsx`, `.xls`, `.csv`, `.tsv` (automatic rosters & category breakdowns).
+- **Documents**: `.pdf`, `.docx`, `.md`, `.txt`, `.json`.
+- **Images**: `.png`, `.jpg`, `.jpeg`, `.webp` (multimodal vision extraction for questions, formulas, and diagrams).
+
+---
+
+## 3. Querying
+
+### From Terminal
+```bash
+python -m rag_knowledge "What is the probability of rolling an even number?"
+```
+
+### In Python Code
 ```python
 import asyncio
 from rag_knowledge import query_rag
 
 async def main():
-    answer = await query_rag("When is the next workshop scheduled?")
+    answer = await query_rag("When is the next workshop?")
     print(answer)
 
 asyncio.run(main())
 ```
 
-### From CLI
-```bash
-# Query knowledge base
-python -m rag_knowledge "When is the next workshop scheduled?"
-
-# List registered documents
-python -m rag_knowledge --list
-```
-
-### Data Ingestion
-Upsert documents from files or directories (`.xlsx`, `.json`, `.csv`, `.md`, `.txt`):
-```bash
-# Dry run preview (auto-detects format)
-python -m rag_knowledge.ingestion.ingest --source data/raw/ --dry-run
-
-# Upsert specific files or folder
-python -m rag_knowledge.ingestion.ingest --source data/raw/faq.json
-python -m rag_knowledge.ingestion.ingest --source data/raw/handbook.md
-python -m rag_knowledge.ingestion.ingest --source data/raw/students/ --type student
-```
-
 ---
 
-## Running Tests
+## 4. Tests
 
-Execute the hermetic unit test suite:
 ```bash
-pytest rag_knowledge/tests -v
+pytest rag_knowledge/tests
 ```

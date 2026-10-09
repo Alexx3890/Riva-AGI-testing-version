@@ -18,16 +18,33 @@ from ..prompts import (
 
 logger = logging.getLogger("rag.gemini")
 
-DEFAULT_GEMINI_MODEL = (
-    os.getenv("GEMINI_RAG_MODEL", "").strip()
-    or os.getenv("GEMINI_MODEL", "").strip()
-    or os.getenv("GEMINI_DEFAULT_MODEL", "gemini-3.5-flash").strip()
-)
-FALLBACK_GEMINI_MODELS = [
-    m.strip()
-    for m in os.getenv("GEMINI_FALLBACK_MODELS", "gemini-3-flash-preview,gemini-flash-lite-latest").split(",")
-    if m.strip()
-]
+def get_default_gemini_model() -> str:
+    """Retrieves primary Gemini model from environment without hardcoded fallbacks."""
+    try:
+        from rag_knowledge import load_env
+        load_env()
+    except ImportError:
+        pass
+    return (
+        os.getenv("GEMINI_RAG_MODEL", "").strip()
+        or os.getenv("GEMINI_MODEL", "").strip()
+        or os.getenv("GEMINI_DEFAULT_MODEL", "").strip()
+    )
+
+
+def get_fallback_gemini_models() -> list[str]:
+    """Retrieves fallback Gemini models from environment without hardcoded strings."""
+    try:
+        from rag_knowledge import load_env
+        load_env()
+    except ImportError:
+        pass
+    raw = os.getenv("GEMINI_FALLBACK_MODELS", "").strip()
+    return [m.strip() for m in raw.split(",") if m.strip()]
+
+
+DEFAULT_GEMINI_MODEL = get_default_gemini_model()
+FALLBACK_GEMINI_MODELS = get_fallback_gemini_models()
 
 
 class GeminiRAGClient:
@@ -55,8 +72,8 @@ class GeminiRAGClient:
             gen_model = os.getenv("GEMINI_MODEL", "").strip()
             if gen_model and "live" in gen_model.lower():
                 gen_model = ""
-            self.model = rag_model or gen_model or DEFAULT_GEMINI_MODEL
-        self.fallback_models = fallback_models if fallback_models is not None else FALLBACK_GEMINI_MODELS
+            self.model = rag_model or gen_model or get_default_gemini_model()
+        self.fallback_models = fallback_models if fallback_models is not None else get_fallback_gemini_models()
         env_timeout = float(os.getenv("GEMINI_TIMEOUT", "20.0"))
         self.timeout = timeout if timeout is not None else env_timeout
         self.system_instruction = system_instruction or DEFAULT_SYSTEM_INSTRUCTION

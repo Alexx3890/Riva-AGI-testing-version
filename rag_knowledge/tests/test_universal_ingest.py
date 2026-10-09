@@ -1,0 +1,189 @@
+"""Unit test suite for Universal Ingestion components."""
+
+import json
+from pathlib import Path
+from unittest.mock import MagicMock
+import pytest
+
+from rag_knowledge.ingestion.privacy import (
+    PrivacyGateError,
+    assert_no_privacy_leaks,
+    redact_private_text,
+    scan_for_privacy_leaks,
+)
+from rag_knowledge.ingestion.joiner import StudentEntityJoiner
+from rag_knowledge.ingestion.readers.word import WordDocxReader
+from rag_knowledge.storage.qdrant_storage import QdrantKnowledgeStore
+
+
+def test_unanchored_privacy_gate_detection():
+    # Test phone embedded inside sentence
+    text_with_phone = "Contact the student coordinator at +91 9876543210 for registration."
+    leaks = scan_for_privacy_leaks(text_with_phone)
+    assert len(leaks["phones"]) == 1
+    assert "9876543210" in leaks["phones"][0]
+
+    # Test email embedded inside sentence
+    text_with_email = "Send notes to student.help@university.edu before noon."
+    leaks = scan_for_privacy_leaks(text_with_email)
+    assert len(leaks["emails"]) == 1
+    assert leaks["emails"][0] == "student.help@university.edu"
+
+    # Test fail-closed assertion
+    doc = {
+        "id": "doc_leak",
+        "title": "Admissions",
+        "content": "Call 9876543210 immediately",
+    }
+    with pytest.raises(PrivacyGateError):
+        assert_no_privacy_leaks([doc])
+
+
+def test_safe_identifier_whitelist():
+    # Safe 10+ digit UID or Roll Number should NOT trigger a phone leak
+    safe_roll = "2025R0111101103"
+    text_with_roll = f"Student with Roll Number {safe_roll} has completed registration."
+    leaks = scan_for_privacy_leaks(text_with_roll, safe_identifiers={safe_roll})
+    assert len(leaks["phones"]) == 0
+
+    doc = {
+        "id": "doc_safe",
+        "title": "Student Record",
+        "content": f"Roll number is {safe_roll}.",
+    }
+    # Should not raise
+    assert_no_privacy_leaks([doc], safe_identifiers={safe_roll})
+
+
+def test_opt_in_redaction():
+    text = "Contact 9876543210 or email test@example.com for info."
+    redacted = redact_private_text(text)
+    assert "9876543210" not in redacted
+    assert "test@example.com" not in redacted
+    assert "[REDACTED_EMAIL]" in redacted
+    assert "[REDACTED_PHONE]" in redacted
+
+
+def test_word_docx_reader(tmp_path):
+    import docx
+
+    doc_file = tmp_path / "sample_policy.docx"
+    doc = docx.Document()
+    doc.add_heading("Academic Regulations", level=1)
+    doc.add_paragraph("Students must maintain 75% attendance.")
+    doc.add_heading("Leave Policy", level=2)
+    doc.add_paragraph("Medical leaves require certificate.")
+
+    # Add a table
+    table = doc.add_table(rows=2, cols=2)
+    table.rows[0].cells[0].text = "Category"
+    table.rows[0].cells[1].text = "Minimum"
+    table.rows[1].cells[0].text = "Theory"
+    table.rows[1].cells[1].text = "75%"
+
+    doc.save(str(doc_file))
+
+    reader = WordDocxReader()
+    assert reader.can_read(doc_file)
+    units = reader.read(doc_file)
+
+    assert len(units) >= 2
+    titles = [u["title"] for u in units]
+    assert any("Academic Regulations" in t or "Leave Policy" in t for t in titles)
+    assert any(u["unit_type"] == "table" for u in units)
+
+
+def test_qdrant_batch_delete():
+    store = QdrantKnowledgeStore(url="https://fake.qdrant.io", api_key="fake")
+    mock_client = MagicMock()
+    store._client = mock_client
+    store._is_connected = True
+
+    deleted_count = store.delete_documents(["doc_1", "doc_2", "doc_3"])
+    assert deleted_count == 3
+    assert mock_client.delete.called
+
+
+
+def test_known_private_value_leak_detection():
+    # Detect father's name or personal phone passed in memory
+    private_names = {"Sanjeev Dutt", "Bhanu Pratap Rai"}
+    doc = {
+        "id": "doc_test_father",
+        "title": "Nominal Roll Record",
+        "content": "Student record with guardian Sanjeev Dutt listed.",
+    }
+    with pytest.raises(PrivacyGateError):
+        assert_no_privacy_leaks([doc], known_private_values=private_names)
+
+
+def test_full_field_redaction():
+    doc = {
+        "id": "doc_leak_all",
+        "title": "Meeting with test@example.com",
+        "summary": "Notes for +91 9876543210 coordinator",
+        "content": "Secret note: contact 9876543210 or email test@example.com",
+        "aliases": ["test@example.com"],
+        "keywords": ["9876543210"],
+    }
+    assert_no_privacy_leaks([doc], opt_in_redact=True)
+    assert "[REDACTED_EMAIL]" in doc["title"]
+    assert "[REDACTED_PHONE]" in doc["summary"]
+    assert "[REDACTED_EMAIL]" in doc["aliases"][0]
+    assert "[REDACTED_PHONE]" in doc["keywords"][0]
+
+
+def test_tabular_metadata_sanitization_and_chunking(tmp_path):
+    from rag_knowledge.ingestion.ingest import load_generic_tabular_dataset
+
+    csv_file = tmp_path / "candidates.csv"
+    # Create 50 candidates in the same domain to trigger member list chunking (>40)
+    lines = ["Name,Email,Phone,Domain"]
+    for i in range(1, 51):
+        lines.append(f"Candidate {i},candidate{i}@test.com,98765432{i:02d},AI/ML")
+    csv_file.write_text("\n".join(lines), encoding="utf-8")
+
+    docs = load_generic_tabular_dataset(csv_file)
+    assert len(docs) > 0
+
+    # Verify no private emails or phones in any document metadata
+    for d in docs:
+        meta = d.get("metadata", {})
+        assert "private" not in meta
+        for k, v in meta.items():
+            assert "email" not in k.lower()
+            assert "phone" not in k.lower()
+            assert "@test.com" not in str(v)
+
+    # Verify chunked aggregation docs exist for AI/ML (Part 1 and Part 2)
+    chunked = [d for d in docs if "part" in d["id"].lower() and "ai_ml" in d["id"].lower()]
+    assert len(chunked) == 2
+    assert "Part 1/2" in chunked[0]["title"]
+    assert "Part 2/2" in chunked[1]["title"]
+
+
+def test_image_document_ingestion(tmp_path, monkeypatch):
+    from rag_knowledge.ingestion.ingest import load_image_documents, load_source_documents
+
+    img_file = tmp_path / "diagram.png"
+    img_file.write_bytes(b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15c4\x00\x00\x00\nIDATx\x9cc\x00\x01\x00\x00\x05\x00\x01\r\n-\xb4\x00\x00\x00\x00IEND\xaeB`\x82")
+
+    mock_text = (
+        "# System Architecture\n"
+        "The system coordinates query ingestion and vector retrieval.\n\n"
+        "---\n\n"
+        "## Performance Metrics\n"
+        "Latency is under 20ms for vector lookup."
+    )
+
+    monkeypatch.setattr("rag_knowledge.ingestion.ingest.extract_image_text", lambda p: mock_text)
+
+    docs = load_image_documents(img_file)
+    assert len(docs) >= 2
+    assert any(d["id"] == "img_diagram_full" for d in docs)
+    assert any("Architecture" in d["title"] or "Performance" in d["title"] for d in docs)
+
+    # Verify load_source_documents detects image extension
+    auto_docs = load_source_documents(img_file)
+    assert len(auto_docs) == len(docs)
+

@@ -1,6 +1,7 @@
 """Prompt templates and sanitization for RAG synthesis."""
 
 from datetime import datetime
+import os
 import re
 from typing import Optional
 
@@ -21,6 +22,32 @@ DEFAULT_SYSTEM_INSTRUCTION: str = (
 )
 
 
+def get_max_context_chars() -> int:
+    """Retrieves maximum context characters from environment without hardcoded limits."""
+    try:
+        from rag_knowledge import load_env
+        load_env()
+    except ImportError:
+        pass
+    val = os.getenv("RAG_MAX_CONTEXT_CHARS", "").strip()
+    if val and val.isdigit():
+        return int(val)
+    return 25000
+
+
+def get_max_query_chars() -> int:
+    """Retrieves maximum query characters from environment without hardcoded limits."""
+    try:
+        from rag_knowledge import load_env
+        load_env()
+    except ImportError:
+        pass
+    val = os.getenv("RAG_MAX_QUERY_CHARS", "").strip()
+    if val and val.isdigit():
+        return int(val)
+    return 1000
+
+
 def sanitize_input(text: Optional[str], max_chars: int, tag_patterns: Optional[list] = None) -> str:
     """Strips delimiter tags to prevent prompt injection and truncates to max length."""
     if not text:
@@ -32,10 +59,18 @@ def sanitize_input(text: Optional[str], max_chars: int, tag_patterns: Optional[l
     return clean[:max_chars].strip()
 
 
-def format_rag_user_prompt(query: str, context: str, current_date: Optional[str] = None) -> str:
+def format_rag_user_prompt(
+    query: str,
+    context: str,
+    current_date: Optional[str] = None,
+    max_context_chars: Optional[int] = None,
+    max_query_chars: Optional[int] = None,
+) -> str:
     """Constructs the structured user prompt payload with delimited context, current date, and query."""
-    safe_context = sanitize_input(context, max_chars=3000, tag_patterns=["context"])
-    safe_query = sanitize_input(query, max_chars=500, tag_patterns=["user_question", "context"])
+    ctx_limit = max_context_chars if max_context_chars is not None else get_max_context_chars()
+    q_limit = max_query_chars if max_query_chars is not None else get_max_query_chars()
+    safe_context = sanitize_input(context, max_chars=ctx_limit, tag_patterns=["context"])
+    safe_query = sanitize_input(query, max_chars=q_limit, tag_patterns=["user_question", "context"])
     today_str = current_date or datetime.now().strftime("%A, %d %B %Y")
 
     return (

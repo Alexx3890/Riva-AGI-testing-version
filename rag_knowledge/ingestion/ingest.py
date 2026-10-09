@@ -10,11 +10,14 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 import csv
+import hashlib
 import json
 import openpyxl
 
 from ..storage.qdrant_storage import get_global_qdrant_store
 from .. import load_env
+from .privacy import assert_no_privacy_leaks
+from .joiner import make_opaque_ref_id
 
 logger = logging.getLogger("rag.ingest")
 
@@ -220,17 +223,30 @@ def load_student_list(filepath: Path) -> List[Dict[str, Any]]:
         wb.close()
 
 
-INSTITUTION_NAME = os.getenv("INSTITUTION_NAME", "").strip()
-DEFAULT_BRANCH = os.getenv("DEFAULT_BRANCH", "Engineering").strip()
-DEFAULT_BATCH = os.getenv("DEFAULT_BATCH", "").strip()
-DEFAULT_DEGREE = os.getenv("DEFAULT_DEGREE", "B.Tech").strip()
+def get_institution_name() -> str:
+    load_env()
+    return os.getenv("INSTITUTION_NAME", "").strip()
 
-CORE_MEMBERS_ENV = os.getenv("CORE_MEMBERS", "").strip()
-KNOWN_CORE_MEMBERS: Set[str] = (
-    {m.strip().upper() for m in CORE_MEMBERS_ENV.split(",") if m.strip()}
-    if CORE_MEMBERS_ENV
-    else set()
-)
+
+def get_default_branch() -> str:
+    load_env()
+    return os.getenv("DEFAULT_BRANCH", "").strip()
+
+
+def get_default_batch() -> str:
+    load_env()
+    return os.getenv("DEFAULT_BATCH", "").strip()
+
+
+def get_default_degree() -> str:
+    load_env()
+    return os.getenv("DEFAULT_DEGREE", "").strip()
+
+
+def get_known_core_members() -> Set[str]:
+    load_env()
+    val = os.getenv("CORE_MEMBERS", "").strip()
+    return {m.strip().upper() for m in val.split(",") if m.strip()} if val else set()
 
 
 def build_unified_student_documents(
@@ -273,11 +289,11 @@ def build_unified_student_documents(
         matched_master = master_by_email.get(nom.get("email", "")) or master_by_name.get(name_upper) or {}
 
         roll_no = matched_master.get("roll_number", "")
-        branch = matched_master.get("branch") or u_info.get("batch_name") or DEFAULT_BRANCH
+        branch = matched_master.get("branch") or u_info.get("batch_name") or get_default_branch()
         sec = nom.get("section") or matched_master.get("section") or ""
         mentor = to_title_case(nom.get("mentor", ""))
         email = nom.get("email") or matched_master.get("email") or ""
-        batch = matched_master.get("academic_batch") or DEFAULT_BATCH
+        batch = matched_master.get("academic_batch") or get_default_batch()
         sem = nom.get("semester") or matched_master.get("year") or ""
         gender = u_info.get("gender", "")
         father = to_title_case(nom.get("father_name") or u_info.get("father_name") or "")
@@ -296,13 +312,14 @@ def build_unified_student_documents(
         if sem:
             keywords.append(f"sem {sem}")
 
+        inst_name = get_institution_name()
         summary_parts = [f"{display_name} is a student in {branch}"]
         if sec:
             summary_parts.append(f"section {sec}")
         if mentor:
             summary_parts.append(f"mentored by {mentor}")
-        if INSTITUTION_NAME:
-            summary_parts.append(f"at {INSTITUTION_NAME}.")
+        if inst_name:
+            summary_parts.append(f"at {inst_name}.")
         else:
             summary_parts[-1] = summary_parts[-1] + "."
         summary = " ".join(summary_parts)
@@ -311,7 +328,7 @@ def build_unified_student_documents(
             f"Student Name: {display_name}",
             f"UID: {uid}",
         ]
-        degree_val = matched_master.get("degree") or DEFAULT_DEGREE
+        degree_val = matched_master.get("degree") or get_default_degree()
         if degree_val:
             content_lines.append(f"Degree: {degree_val}")
         content_lines.append(f"Branch: {branch}")
@@ -342,12 +359,7 @@ def build_unified_student_documents(
                 "semester": sem,
                 "mentor": mentor,
                 "academic_batch": batch,
-                "private": {
-                    "email": email,
-                    "phone": nom.get("phone", ""),
-                    "gender": gender,
-                    "father_name": father,
-                },
+                "entity_ref_id": make_opaque_ref_id(roll_no or uid),
             },
             "is_active": True,
         }
@@ -362,16 +374,16 @@ def build_unified_student_documents(
             continue
 
         raw_name = mr.get("name", "")
-        if raw_name.upper().strip() in KNOWN_CORE_MEMBERS:
+        if raw_name.upper().strip() in get_known_core_members():
             continue
         display_name = to_title_case(raw_name)
         if not display_name:
             continue
 
-        branch = mr.get("branch") or DEFAULT_BRANCH
+        branch = mr.get("branch") or get_default_branch()
         sec = mr.get("section", "")
-        batch = mr.get("academic_batch") or DEFAULT_BATCH
-        degree = mr.get("degree") or DEFAULT_DEGREE
+        batch = mr.get("academic_batch") or get_default_batch()
+        degree = mr.get("degree") or get_default_degree()
         year = mr.get("year", "")
         email = mr.get("email", "")
         category = mr.get("category", "")
@@ -389,7 +401,8 @@ def build_unified_student_documents(
         if batch:
             keywords.append(batch)
 
-        inst_suffix = f" at {INSTITUTION_NAME}." if INSTITUTION_NAME else "."
+        inst_name = get_institution_name()
+        inst_suffix = f" at {inst_name}." if inst_name else "."
         batch_info = f", Batch {batch}" if batch else ""
         sec_info = f"Section {sec}" if sec else ""
         paren_info = f" ({sec_info}{batch_info})" if (sec_info or batch_info) else ""
@@ -424,13 +437,7 @@ def build_unified_student_documents(
                 "degree": degree,
                 "academic_batch": batch,
                 "admission_status": status,
-                "private": {
-                    "email": email,
-                    "phone": phone,
-                    "category": category,
-                    "date_of_admission": adm_date,
-                    "admission_category": adm_cat,
-                },
+                "entity_ref_id": make_opaque_ref_id(roll_no),
             },
             "is_active": True,
         }
@@ -444,21 +451,19 @@ def build_unified_student_documents(
 _EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+")
 
 
-def assert_no_private_in_embedded_fields(documents: List[Dict[str, Any]]) -> None:
-    """Enforces that no email addresses or contact details leak into vector-embedded fields."""
-    bad = []
-    for d in documents:
-        embedded = " ".join([
-            d.get("title", ""),
-            d.get("summary", ""),
-            d.get("content", ""),
-            " ".join(d.get("aliases", [])),
-            " ".join(d.get("keywords", [])),
-        ])
-        if _EMAIL_RE.search(embedded):
-            bad.append(d.get("id", "unknown"))
-    if bad:
-        raise ValueError(f"Private data found in embedded fields for: {bad[:5]} (+{max(0, len(bad) - 5)} more)")
+def assert_no_private_in_embedded_fields(
+    documents: List[Dict[str, Any]],
+    safe_identifiers: Optional[Set[str]] = None,
+    known_private_values: Optional[Set[str]] = None,
+    opt_in_redact: bool = False,
+) -> None:
+    """Enforces zero-leak policy across embedded fields and payloads using the unanchored privacy gate."""
+    assert_no_privacy_leaks(
+        documents,
+        safe_identifiers=safe_identifiers,
+        known_private_values=known_private_values,
+        opt_in_redact=opt_in_redact,
+    )
 
 
 def load_json_documents(filepath: Path) -> List[Dict[str, Any]]:
@@ -613,8 +618,7 @@ def load_pdf_documents(filepath: Path) -> List[Dict[str, Any]]:
 
             for m in schedule_items:
                 s_no, act_type, planned_date, rest = m.groups()
-                clean_title = re.split(r"\b(?:H Block|Auditorium|Block|Lab)\b", rest)[0].strip()
-                clean_title = re.sub(r"[^\x00-\x7F]+", "-", clean_title).strip("- ")
+                clean_title = re.sub(r"[^\x00-\x7F]+", "-", rest.strip()).strip("- ")
                 title = f"{act_type}: {clean_title}" if clean_title else f"{act_type} #{s_no}"
                 summary = f"{title} is scheduled for {planned_date}."
                 documents.append({
@@ -663,6 +667,191 @@ def load_pdf_documents(filepath: Path) -> List[Dict[str, Any]]:
     except Exception as e:
         logger.error(f"Error parsing PDF {filepath.name}: {e}")
         return []
+
+
+def extract_image_text(filepath: Path) -> str:
+    """Extracts textual and structured content from an image via Gemini Vision or local OCR."""
+    load_env()
+    api_key = os.getenv("GEMINI_API_KEY", "").strip()
+
+    # 1. Primary: Gemini Vision API
+    if api_key:
+        try:
+            import base64
+            import urllib.error
+            import urllib.request
+
+            ext = filepath.suffix.lower().lstrip(".")
+            mime_map = {
+                "png": "image/png",
+                "jpg": "image/jpeg",
+                "jpeg": "image/jpeg",
+                "webp": "image/webp",
+                "gif": "image/gif",
+                "bmp": "image/bmp",
+            }
+            mime_type = mime_map.get(ext, "image/png")
+
+            with open(filepath, "rb") as f:
+                b64_data = base64.b64encode(f.read()).decode("utf-8")
+
+            from ..clients.gemini_client import get_default_gemini_model, get_fallback_gemini_models
+
+            default_model = get_default_gemini_model()
+            fallback_models = get_fallback_gemini_models()
+            model_candidates = ([default_model] if default_model else []) + fallback_models
+            valid_models = []
+            for m in model_candidates:
+                if m and "live" not in m.lower() and m not in valid_models:
+                    valid_models.append(m)
+
+            prompt_text = (
+                "Transcribe and extract all content from this document/image accurately. "
+                "Include all questions, numbered items, formulas, answers, solutions, tables, "
+                "headings, and details in clean Markdown format."
+            )
+
+            for model_name in valid_models:
+                url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent"
+                payload = {
+                    "contents": [
+                        {
+                            "parts": [
+                                {"inlineData": {"mimeType": mime_type, "data": b64_data}},
+                                {"text": prompt_text},
+                            ]
+                        }
+                    ],
+                    "generationConfig": {
+                        "temperature": 0.0,
+                        "maxOutputTokens": 2048,
+                    },
+                }
+                req = urllib.request.Request(
+                    url,
+                    data=json.dumps(payload).encode("utf-8"),
+                    headers={"Content-Type": "application/json", "x-goog-api-key": api_key},
+                    method="POST",
+                )
+                try:
+                    with urllib.request.urlopen(req, timeout=30.0) as resp:
+                        res = json.loads(resp.read().decode("utf-8"))
+                        cand = res.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "")
+                        if cand.strip():
+                            logger.info(f"Successfully extracted text from image {filepath.name} using Gemini Vision ({model_name}).")
+                            return cand.strip()
+                except urllib.error.HTTPError as he:
+                    logger.warning(f"Gemini Vision call for {model_name} HTTP {he.code}: {he.reason}")
+                    continue
+                except Exception as ex:
+                    logger.warning(f"Gemini Vision call for {model_name} failed: {ex}")
+                    continue
+        except Exception as e:
+            logger.warning(f"Error invoking Gemini Vision for {filepath.name}: {e}")
+
+    # 2. Local OCR fallback (pytesseract)
+    try:
+        import pytesseract
+        from PIL import Image
+        with Image.open(filepath) as img:
+            ocr_text = pytesseract.image_to_string(img).strip()
+            if ocr_text:
+                logger.info(f"Extracted OCR text from {filepath.name} via pytesseract.")
+                return ocr_text
+    except Exception:
+        pass
+
+    # 3. Descriptive metadata fallback
+    try:
+        from PIL import Image
+        with Image.open(filepath) as img:
+            w, h = img.size
+            fmt = img.format or filepath.suffix.lstrip(".").upper()
+            return f"Image document '{filepath.name}' ({fmt}, {w}x{h} pixels)."
+    except Exception:
+        return f"Image document '{filepath.name}'."
+
+
+def load_image_documents(filepath: Path) -> List[Dict[str, Any]]:
+    """Loads knowledge documents from an image file using multimodal Vision or OCR."""
+    if not filepath.is_file():
+        return []
+
+    raw_text = extract_image_text(filepath)
+    if not raw_text:
+        return []
+
+    img_meta: Dict[str, Any] = {"source": filepath.name, "file_type": "image"}
+    try:
+        from PIL import Image
+        with Image.open(filepath) as img:
+            img_meta["width"] = img.size[0]
+            img_meta["height"] = img.size[1]
+            img_meta["dimensions"] = f"{img.size[0]}x{img.size[1]}"
+            img_meta["format"] = img.format or filepath.suffix.lstrip(".").upper()
+    except Exception:
+        pass
+
+    documents = []
+    clean_stem = re.sub(r"[^a-zA-Z0-9]+", "_", filepath.stem).strip("_").lower()
+
+    # Split into sections if image contains multiple questions or headings
+    raw_sections = [s.strip() for s in re.split(r"\n\s*---\s*\n", raw_text) if s.strip()]
+    if len(raw_sections) <= 1:
+        raw_sections = [s.strip() for s in re.split(r"\n(?=#{1,3}\s+)", raw_text) if s.strip()]
+
+    if len(raw_sections) > 1:
+        # Full content overview
+        documents.append({
+            "id": f"img_{clean_stem}_full",
+            "title": f"{filepath.stem.replace('_', ' ').title()} - Full Content",
+            "category": "document",
+            "summary": f"Image transcription of {filepath.name} with {len(raw_sections)} sections.",
+            "content": raw_text,
+            "aliases": [filepath.stem, filepath.name],
+            "keywords": ["image", "transcription", clean_stem],
+            "metadata": dict(img_meta),
+            "is_active": True,
+        })
+        for idx, sec in enumerate(raw_sections):
+            lines = [l.strip() for l in sec.split("\n") if l.strip()]
+            sec_title = lines[0].lstrip("#* -").rstrip("*").strip() if lines else f"Section {idx + 1}"
+            if len(sec_title) > 80:
+                sec_title = sec_title[:80] + "..."
+            summary = lines[1] if len(lines) > 1 else sec[:200]
+            sec_meta = dict(img_meta)
+            sec_meta["section_index"] = idx + 1
+
+            documents.append({
+                "id": f"img_{clean_stem}_{idx + 1}",
+                "title": f"{filepath.stem.replace('_', ' ').title()} - {sec_title}",
+                "category": "document",
+                "summary": summary[:250],
+                "content": sec,
+                "aliases": [sec_title, filepath.stem],
+                "keywords": ["image", clean_stem] + [w.lower() for w in re.findall(r"\b[A-Za-z]{3,}\b", sec_title)[:5]],
+                "metadata": sec_meta,
+                "is_active": True,
+            })
+    else:
+        first_line = raw_text.splitlines()[0].lstrip("#* -").strip() if raw_text else filepath.stem
+        title = f"{filepath.stem.replace('_', ' ').title()}"
+        if first_line and len(first_line) < 60:
+            title = f"{title}: {first_line}"
+
+        documents.append({
+            "id": f"img_{clean_stem}_1",
+            "title": title,
+            "category": "document",
+            "summary": raw_text[:250].replace("\n", " "),
+            "content": raw_text,
+            "aliases": [filepath.stem, filepath.name],
+            "keywords": ["image", "transcription", clean_stem],
+            "metadata": dict(img_meta),
+            "is_active": True,
+        })
+
+    return documents
 
 
 def load_generic_tabular_dataset(filepath: Path, max_row_docs: int = 1500) -> List[Dict[str, Any]]:
@@ -769,7 +958,7 @@ def load_generic_tabular_dataset(filepath: Path, max_row_docs: int = 1500) -> Li
             if not vals:
                 continue
             distinct = set(vals)
-            if 1 < len(distinct) <= 30 and (len(distinct) / len(vals) <= 0.65 or len(distinct) <= 10):
+            if 1 <= len(distinct) <= 30 and (len(distinct) / len(vals) <= 0.65 or len(distinct) <= 10):
                 categorical_cols[c_idx] = (h, Counter(vals))
 
         # 3. Build Table Master Overview Document
@@ -837,13 +1026,13 @@ def load_generic_tabular_dataset(filepath: Path, max_row_docs: int = 1500) -> Li
                     "category": "aggregation",
                     "summary": f"There are exactly {len(wl_rows)} students on the waiting list (waitlist) in {sub_title}.",
                     "content": "\n".join(wl_lines),
-                    "aliases": [f"{sub_title} Waiting List", f"{sub_title} Waitlist", "Waiting List", "NextGen Waiting List", "NextGen Waitlist"],
-                    "keywords": ["waiting", "list", "waitlist", "waitlisted", clean_slug, "students"],
+                    "aliases": [f"{sub_title} Waiting List", f"{sub_title} Waitlist", "Waiting List"],
+                    "keywords": ["waiting", "list", "waitlist", "waitlisted", clean_slug],
                     "metadata": {"source": filepath.name, "waitlisted_count": len(wl_rows)},
                     "is_active": True,
                 })
 
-            # B. Dedicated Attendance Document (Orientation / Event Attendance)
+            # B. Dedicated Attendance Document
             is_attendance = "attendance" in h_low or (len(cnt) <= 4 and set(cnt.keys()).issubset({"P", "A", "Present", "Absent", "p", "a"}))
             if is_attendance and len(cnt) <= 6:
                 att_lines = [
@@ -869,8 +1058,8 @@ def load_generic_tabular_dataset(filepath: Path, max_row_docs: int = 1500) -> Li
                     "category": "aggregation",
                     "summary": f"Attendance summary for {sub_title} ({h}): " + ", ".join(f"{k}: {v}" for k, v in cnt.items()),
                     "content": "\n".join(att_lines),
-                    "aliases": [f"{sub_title} Attendance", f"{sub_title} Orientation Attendance", "Orientation Attendance"],
-                    "keywords": ["attendance", "present", "absent", "p", "orientation", clean_slug],
+                    "aliases": [f"{sub_title} Attendance", "Attendance Summary", "Attendance"],
+                    "keywords": ["attendance", "present", "absent", "roster", clean_slug],
                     "metadata": {"source": filepath.name, "present_count": len(p_rows) if p_rows else 0},
                     "is_active": True,
                 })
@@ -893,8 +1082,33 @@ def load_generic_tabular_dataset(filepath: Path, max_row_docs: int = 1500) -> Li
                         by_cat[r[c_idx]].append(entity)
 
                 for cat_val, names in sorted(by_cat.items(), key=lambda x: len(x[1]), reverse=True):
-                    cat_lines.append(f"\n### {cat_val} ({len(names)} records):")
-                    cat_lines.append(", ".join(names[:40]))
+                    cat_slug = re.sub(r"[^a-zA-Z0-9]+", "_", cat_val).strip("_").lower()
+                    chunk_size = 40
+                    if len(names) <= chunk_size:
+                        cat_lines.append(f"\n### {cat_val} ({len(names)} records):")
+                        cat_lines.append(", ".join(names))
+                    else:
+                        num_parts = (len(names) + chunk_size - 1) // chunk_size
+                        for part_idx in range(num_parts):
+                            chunk_names = names[part_idx * chunk_size : (part_idx + 1) * chunk_size]
+                            chunk_lines = [
+                                f"{sub_title} - {h}: {cat_val} (Part {part_idx + 1}/{num_parts})",
+                                "",
+                                f"Total records in {cat_val}: {len(names)} (Displaying {len(chunk_names)} in this part)",
+                                "",
+                                ", ".join(chunk_names),
+                            ]
+                            documents.append({
+                                "id": f"table_{clean_slug}_{clean_h_key}_{cat_slug}_part{part_idx + 1}",
+                                "title": f"{sub_title} - {h}: {cat_val} (Part {part_idx + 1}/{num_parts}, Total: {len(names)})",
+                                "category": "aggregation",
+                                "summary": f"{sub_title} members for {cat_val} in {h} (Part {part_idx + 1}/{num_parts}, {len(names)} total).",
+                                "content": "\n".join(chunk_lines),
+                                "aliases": [f"{sub_title} {cat_val}", f"{cat_val} {h}"],
+                                "keywords": [h.lower(), clean_slug, cat_slug, "breakdown"],
+                                "metadata": {"source": filepath.name, "column": h, "category_value": cat_val, "total_records": len(names)},
+                                "is_active": True,
+                            })
 
                 documents.append({
                     "id": f"table_{clean_slug}_{clean_h_key}",
@@ -908,8 +1122,8 @@ def load_generic_tabular_dataset(filepath: Path, max_row_docs: int = 1500) -> Li
                     "is_active": True,
                 })
 
-        # 5. Row-level Structured Entity Documents
-        for idx, r in enumerate(data_rows[:max_row_docs]):
+        # 5. Row-level Structured Entity Documents (Process all rows without silent truncation)
+        for idx, r in enumerate(data_rows):
             entity_name = r[name_col_idx] if len(r) > name_col_idx and r[name_col_idx] else f"Record #{idx + 1}"
             if not entity_name or entity_name.lower() in ("not found", "none", "nan"):
                 continue
@@ -918,11 +1132,18 @@ def load_generic_tabular_dataset(filepath: Path, max_row_docs: int = 1500) -> Li
             row_meta: Dict[str, Any] = {"source": filepath.name, "row_index": idx + 1}
             for ci, h in enumerate(headers):
                 if ci < len(r) and r[ci]:
-                    val = r[ci]
-                    row_meta[h] = val
-                    # Mask personal emails & phone numbers from vector-embedded text
-                    if "@" in val or re.match(r"^\+?\d{10,12}$", val):
+                    val = str(r[ci]).strip()
+                    # Strictly filter private contact details from both metadata payload and embedded text
+                    h_lower = h.lower()
+                    if any(k in h_lower for k in ["email", "phone", "mobile", "contact", "father", "parent", "gender", "address"]):
                         continue
+                    if "@" in val and "." in val:
+                        continue
+                    digits = re.sub(r"[^\d]", "", val)
+                    if len(digits) >= 10 and (val.startswith("+") or digits.startswith(("6", "7", "8", "9"))):
+                        continue
+
+                    row_meta[h] = val
                     row_fields.append(f"* **{h}**: {val}")
 
             if not row_fields:
@@ -931,9 +1152,11 @@ def load_generic_tabular_dataset(filepath: Path, max_row_docs: int = 1500) -> Li
             entity_title = f"{entity_name} - {sub_title}"
             row_content = f"### {entity_name}\n**Dataset**: {sub_title}\n\n" + "\n".join(row_fields)
             clean_entity_id = re.sub(r"[^a-zA-Z0-9]+", "_", entity_name).strip("_").lower()
+            doc_seed = f"{clean_slug}_{clean_entity_id}_{idx + 1}"
+            stable_doc_id = f"rec_{clean_slug[:16]}_{hashlib.sha256(doc_seed.encode()).hexdigest()[:16]}"
 
             documents.append({
-                "id": f"rec_{clean_slug}_{idx + 1}_{clean_entity_id}"[:64],
+                "id": stable_doc_id,
                 "title": entity_title[:120],
                 "category": "record",
                 "summary": f"Record for {entity_name} in {sub_title}. " + "; ".join(row_fields[:3])[:180],
@@ -962,6 +1185,8 @@ def load_source_documents(source: Path, data_type: str = "auto") -> List[Dict[st
             return load_text_or_markdown(source_path)
         if dtype == "pdf" or ext == ".pdf":
             return load_pdf_documents(source_path)
+        if dtype in ("image", "vision") or ext in (".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".tiff"):
+            return load_image_documents(source_path)
         return []
 
     if source_path.is_dir():
@@ -1017,6 +1242,8 @@ def load_source_documents(source: Path, data_type: str = "auto") -> List[Dict[st
                     docs.extend(load_generic_tabular_dataset(xlsx_sibling))
                 else:
                     docs.extend(load_pdf_documents(file))
+            elif ext in (".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".tiff"):
+                docs.extend(load_image_documents(file))
         return docs
 
     return []
@@ -1028,10 +1255,12 @@ def run_ingestion(
     limit: Optional[int] = None,
     batch_size: int = 100,
     data_type: str = "auto",
+    redact: bool = False,
 ) -> int:
     """Coordinates reading datasets, building documents, and upserting into Qdrant."""
     load_env()
-    source_path = Path(source_dir)
+    cleaned_source = str(source_dir).strip(' "\'\r\n\t') if isinstance(source_dir, (str, Path)) else source_dir
+    source_path = Path(cleaned_source)
 
     documents = load_source_documents(source_path, data_type=data_type)
 
@@ -1053,7 +1282,7 @@ def run_ingestion(
         logger.error(f"No valid knowledge data found in {source_path}")
         return 0
 
-    assert_no_private_in_embedded_fields(documents)
+    assert_no_private_in_embedded_fields(documents, opt_in_redact=redact)
 
     if limit and limit > 0:
         documents = documents[:limit]
@@ -1138,19 +1367,56 @@ def main():
         default=150,
         help="Bulk upsert batch size",
     )
+    parser.add_argument(
+        "--redact",
+        action="store_true",
+        help="Opt-in to redacting detected personal emails and phone numbers instead of failing (PRD S4)",
+    )
+    parser.add_argument(
+        "--clear",
+        "--delete-all",
+        action="store_true",
+        help="Delete all documents from the Qdrant Cloud collection and reset it empty",
+    )
 
     args = parser.parse_args()
-    raw_path = Path(args.source)
+
+    if getattr(args, "clear", False):
+        store = get_global_qdrant_store()
+        if not store.is_available():
+            print(f"[ERROR] Qdrant storage is unreachable. Verify Qdrant configuration in .env.")
+            sys.exit(1)
+        ok = store.clear_all()
+        if ok:
+            print(f"[SUCCESS] All documents successfully deleted from Qdrant Cloud (collection: '{store.collection_name}'). The database is completely cleared.")
+            sys.exit(0)
+        else:
+            print(f"[ERROR] Failed to clear Qdrant collection '{store.collection_name}'.")
+            sys.exit(1)
+
+    raw_source = (args.source or "").strip(' "\'\r\n\t')
+    raw_path = Path(raw_source)
     package_dir = Path(__file__).resolve().parent.parent
 
-    if raw_path.is_file() or raw_path.is_dir():
+    candidates = [
+        raw_path,
+        Path.cwd() / raw_source,
+        package_dir.parent / raw_source,
+        package_dir / raw_source,
+    ]
+    if raw_source.startswith("rag_knowledge/") or raw_source.startswith("rag_knowledge\\"):
+        sub_rel = raw_source[len("rag_knowledge") + 1:]
+        candidates.append(package_dir / sub_rel)
+        candidates.append(Path.cwd() / sub_rel)
+
+    source_dir = None
+    for cand in candidates:
+        if cand.is_file() or cand.is_dir():
+            source_dir = cand
+            break
+
+    if source_dir is None:
         source_dir = raw_path
-    elif (package_dir / args.source).exists():
-        source_dir = package_dir / args.source
-    elif (package_dir.parent / args.source).exists():
-        source_dir = package_dir.parent / args.source
-    else:
-        source_dir = package_dir / args.source
 
     total = run_ingestion(
         source_dir=source_dir,
@@ -1158,6 +1424,7 @@ def main():
         limit=args.limit,
         batch_size=args.batch_size,
         data_type=args.type,
+        redact=args.redact,
     )
     if not args.dry_run and total == 0:
         sys.exit(1)

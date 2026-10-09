@@ -67,20 +67,17 @@ class QdrantKnowledgeStore:
         self.collection_name = (
             collection_name
             if collection_name is not None
-            else (
-                os.getenv("QDRANT_COLLECTION", "riva_knowledge").strip()
-                or "riva_knowledge"
-            )
+            else os.getenv("QDRANT_COLLECTION", "").strip()
         )
         self.model_name = (
             model_name
             if model_name is not None
-            else (os.getenv("EMBEDDING_MODEL", "").strip() or "BAAI/bge-small-en-v1.5")
+            else os.getenv("EMBEDDING_MODEL", "").strip()
         )
         self.vector_size = (
             vector_size
             if vector_size is not None
-            else int(os.getenv("EMBEDDING_DIM", "384").strip() or 384)
+            else (int(os.getenv("EMBEDDING_DIM").strip()) if os.getenv("EMBEDDING_DIM", "").strip().isdigit() else None)
         )
         env_timeout = float(os.getenv("QDRANT_TIMEOUT", "15.0"))
         self.timeout = timeout if timeout is not None else env_timeout
@@ -278,72 +275,76 @@ class QdrantKnowledgeStore:
                 collection_name=self.collection_name,
                 query=q_vec,
                 query_filter=models.Filter(must=[active_filter]),
-                limit=effective_top_k * 2,
+                limit=max(effective_top_k * 3, 15),
                 score_threshold=effective_min_score,
                 with_payload=True,
             ).points
 
+            raw_words = [re.sub(r"[^\w]", "", w).lower() for w in clean_query.split()]
+            raw_words = [w for w in raw_words if w]
             candidate_tokens = [re.sub(r"[^A-Za-z0-9]", "", t).upper() for t in clean_query.split()]
             id_tokens = list({t for t in candidate_tokens if _ID_TOKEN_PATTERN.match(t)})
 
-            exact_matches = []
-            if id_tokens:
-                try:
-                    id_candidates = [i.lower() for i in id_tokens] + [f"student_{i.lower()}" for i in id_tokens]
-                    exact_filter = models.Filter(
-                        must=[
-                            active_filter,
-                            models.Filter(
-                                should=[
-                                    models.FieldCondition(key="aliases", match=models.MatchAny(any=id_tokens)),
-                                    models.FieldCondition(
-                                        key="id",
-                                        match=models.MatchAny(any=id_candidates),
-                                    ),
-                                ]
-                            ),
-                        ]
-                    )
-                    hits = self._client.scroll(
-                        collection_name=self.collection_name,
-                        scroll_filter=exact_filter,
-                        limit=effective_top_k,
-                        with_payload=True,
-                    )[0]
-                    exact_matches.extend(hits)
-                except Exception as ex:
-                    logger.debug(f"Exact match check exception: {ex}")
+            query_phrases = set()
+            if len(raw_words) >= 2:
+                for n in range(2, min(len(raw_words), 4) + 1):
+                    for i in range(len(raw_words) - n + 1):
+                        query_phrases.add(" ".join(raw_words[i : i + n]))
+            elif raw_words:
+                query_phrases.add(raw_words[0])
 
             combined: Dict[str, Dict[str, Any]] = {}
-
-            for hit in exact_matches:
+            for hit in search_results:
                 payload = hit.payload or {}
                 doc_id = payload.get("id") or str(hit.id)
+                if doc_id in combined:
+                    continue
                 meta = dict(payload.get("metadata") or {})
                 meta.pop("private", None)
+                score = round(float(hit.score) * 100, 2)
+
+                aliases_lower = [str(a).lower() for a in payload.get("aliases", [])]
+                title_lower = str(payload.get("title", "")).lower()
+
+                is_exact = any(p in aliases_lower for p in query_phrases) or any(p in title_lower for p in query_phrases)
+                if not is_exact and id_tokens:
+                    is_exact = any(it in [str(a).upper() for a in payload.get("aliases", [])] for it in id_tokens)
+
+                if is_exact:
+                    score = 100.0
+
                 combined[doc_id] = {
                     "id": doc_id,
                     "title": payload.get("title", ""),
                     "summary": payload.get("summary", ""),
                     "content": payload.get("content", ""),
                     "metadata": meta,
-                    "score": 100.0,
+                    "score": score,
                 }
 
-            for hit in search_results:
-                payload = hit.payload or {}
-                doc_id = payload.get("id") or str(hit.id)
-                if doc_id not in combined:
-                    meta = dict(payload.get("metadata") or {})
-                    meta.pop("private", None)
-                    combined[doc_id] = {
-                        "id": doc_id,
-                        "title": payload.get("title", ""),
-                        "summary": payload.get("summary", ""),
-                        "content": payload.get("content", ""),
-                        "metadata": meta,
-                        "score": round(float(hit.score) * 100, 2),
-                    }
+            if id_tokens and not any(d.get("score") == 100.0 for d in combined.values()):
+                for it in id_tokens:
+                    pt_id = string_to_point_id(f"student_{it.lower()}")
+                    try:
+                        pts = self._client.retrieve(collection_name=self.collection_name, ids=[pt_id], with_payload=True)
+                        if not pts:
+                            pt_id = string_to_point_id(it)
+                            pts = self._client.retrieve(collection_name=self.collection_name, ids=[pt_id], with_payload=True)
+                        if pts:
+                            p = pts[0].payload or {}
+                            m = dict(p.get("metadata") or {})
+                            m.pop("private", None)
+                            did = p.get("id", str(pts[0].id))
+                            combined[did] = {
+                                "id": did,
+                                "title": p.get("title", ""),
+                                "summary": p.get("summary", ""),
+                                "content": p.get("content", ""),
+                                "metadata": m,
+                                "score": 100.0,
+                            }
+                    except Exception as ex:
+                        logger.debug(f"Direct ID fallback retrieve note: {ex}")
 
             results = list(combined.values())
             results.sort(key=lambda x: x["score"], reverse=True)
@@ -426,18 +427,36 @@ class QdrantKnowledgeStore:
 
     def delete_document(self, doc_id: str) -> bool:
         """Deletes a document by ID."""
-        if not self.is_available() or not self._client:
-            return False
+        return self.delete_documents([doc_id]) == 1
 
-        point_id = string_to_point_id(doc_id)
+    def delete_documents(self, doc_ids: List[str]) -> int:
+        """Deletes multiple documents in bulk by string IDs."""
+        if not self.is_available() or not self._client or not doc_ids:
+            return 0
+
+        point_ids = [string_to_point_id(d) for d in doc_ids]
         try:
             self._client.delete(
                 collection_name=self.collection_name,
-                points_selector=[point_id],
+                points_selector=models.PointIdsList(points=point_ids),
             )
+            return len(point_ids)
+        except Exception as e:
+            logger.error(f"Error bulk deleting {len(doc_ids)} documents from Qdrant: {e}", exc_info=True)
+            return 0
+
+    def clear_all(self) -> bool:
+        """Deletes all documents and resets the collection cleanly."""
+        if not self.is_available() or not self._client:
+            return False
+        try:
+            self._client.delete_collection(self.collection_name)
+            logger.info("Deleted collection '%s'", self.collection_name)
+            self._ensure_collection()
+            logger.info("Recreated collection '%s' with empty state.", self.collection_name)
             return True
         except Exception as e:
-            logger.error(f"Error deleting document '{doc_id}' from Qdrant: {e}", exc_info=True)
+            logger.error(f"Error clearing Qdrant collection: {e}", exc_info=True)
             return False
 
 
