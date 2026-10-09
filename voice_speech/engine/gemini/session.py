@@ -1,18 +1,20 @@
 """Gemini Live API Session & Connection Configuration Builder.
 
-Builds LiveConnectConfig instances with server-side VAD, prebuilt voice configurations,
-context compression, tools, and session resumption handles.
+Builds LiveConnectConfig instances with server-side VAD, synchronized voice and persona
+configurations, context compression, tools, and session resumption handles.
 """
 
+import logging
 from typing import List, Optional
 from google import genai
 from google.genai import types
 
 from voice_speech.engine.config.settings import Settings, VADConfig
 from voice_speech.engine.config.prompts import get_system_instruction
+from voice_speech.engine.config.persona import AgentPersona, resolve_persona, VALID_VOICES
 from voice_speech.engine.gemini.tools import DEFAULT_TOOLS
 
-VALID_VOICES = {"Aoede", "Kore", "Puck", "Charon", "Fenrir"}
+logger = logging.getLogger("riva.session")
 
 
 def create_gemini_client(api_key: str) -> genai.Client:
@@ -64,25 +66,39 @@ def build_connect_config(
     settings: Settings,
     voice: str = "Aoede",
     language: str = "auto",
+    gender: Optional[str] = None,
+    persona: Optional[AgentPersona] = None,
     resumption_handle: Optional[str] = None,
     tools: Optional[List[types.Tool]] = None,
 ) -> types.LiveConnectConfig:
     """Builds a complete, immutable LiveConnectConfig for a Gemini Live session.
 
+    Guarantees that TTS speech configuration and system persona instructions remain
+    strictly synchronized according to the authoritative AgentPersona.
+
     Args:
         settings: Application settings container.
         voice: Requested prebuilt voice name.
         language: Spoken language code ('auto', 'hindi', 'english', 'hinglish').
+        gender: Optional explicit gender string ('female' | 'male').
+        persona: Optional pre-resolved AgentPersona.
         resumption_handle: Optional opaque resumption handle from prior turns.
         tools: Optional list of tools to provide to the model (defaults to DEFAULT_TOOLS).
 
     Returns:
         Fully configured types.LiveConnectConfig ready for client.aio.live.connect().
     """
-    selected_voice = voice if voice in VALID_VOICES else settings.gemini.voice_name
-    instruction = get_system_instruction(language)
+    active_persona = persona or resolve_persona(
+        voice=voice or settings.gemini.voice_name,
+        configured_gender=gender,
+    )
+
+    instruction = get_system_instruction(
+        language=language,
+        gender=active_persona.gender,
+    )
     vad_config = build_vad_config(settings.vad)
-    speech_config = build_speech_config(selected_voice)
+    speech_config = build_speech_config(active_persona.voice_id)
     thinking_config = build_thinking_config(settings.gemini.thinking_level)
     active_tools = tools if tools is not None else DEFAULT_TOOLS
 

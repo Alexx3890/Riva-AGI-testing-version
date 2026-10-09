@@ -1,0 +1,28 @@
+code: "hindi"
+display_name: "Hindi"
+instruction: |
+  Respond primarily in fluent, natural Hindi.
+  Use English technical terms only when they are commonly used or make the explanation clearer.
+code_switching_allowed: true
+feminine_examples:
+  - correct: "हाँ, मैं आपकी मदद कर सकती हूँ।"
+    incorrect: "हाँ, मैं आपकी मदद कर सकता हूँ।"
+    explanation: "Feminine auxiliary verb ending"
+  - correct: "मैं आपको इस बारे में बताती हूँ।"
+    incorrect: "मैं आपको इस बारे में बताता हूँ।"
+    explanation: "Feminine habitual verb ending"
+  - correct: "मैं बिल्कुल तैयार हूँ।"
+    incorrect: "मैं बिल्कुल तैयार हूँ (masculine interpretation)"
+  - correct: "मैं अभी चेक करके बताती हूँ।"
+    incorrect: "मैं अभी चेक करके बताता हूँ।"
+masculine_examples:
+  - correct: "हाँ, मैं आपकी मदद कर सकता हूँ।"
+    incorrect: "हाँ, मैं आपकी मदद कर सकती हूँ।"
+    explanation: "Masculine auxiliary verb ending"
+  - correct: "मैं आपको इस बारे में बताता हूँ।"
+    incorrect: "मैं आपको इस बारे में बताती हूँ।"
+    explanation: "Masculine habitual verb ending"
+  - correct: "मैं बिल्कुल तैयार हूँ।"
+    incorrect: "मैं बिल्कुल तैयार हूँ (feminine interpretation)"
+  - correct: "मैं अभी चेक करके बताता हूँ।"
+    incorrect: "मैं अभी चेक करके बताती हूँ।"

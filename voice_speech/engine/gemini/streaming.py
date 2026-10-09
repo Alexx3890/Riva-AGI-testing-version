@@ -11,6 +11,7 @@ from fastapi import WebSocket, WebSocketDisconnect
 from google.genai import types
 
 from voice_speech.engine.config.settings import Settings
+from voice_speech.engine.config.persona import resolve_persona
 from voice_speech.engine.conversation.state import ConversationState
 from voice_speech.engine.conversation.session_manager import SessionManager
 from voice_speech.engine.gemini.session import build_connect_config
@@ -186,9 +187,14 @@ async def run_live_bridge(
     session_mgr: SessionManager,
     voice: str = "Aoede",
     language: str = "auto",
+    gender: Optional[str] = None,
 ) -> None:
     """Runs the persistent bidirectional bridge with automated session resumption reconnects."""
     model_name = settings.gemini.model
+    # Resolve authoritative persona and store on session state
+    persona = resolve_persona(voice=voice, configured_gender=gender)
+    state.persona = persona
+
     reader_task = asyncio.create_task(ws_reader(websocket, state))
 
     try:
@@ -202,12 +208,16 @@ async def run_live_bridge(
 
             connect_config = build_connect_config(
                 settings=settings,
-                voice=voice,
+                persona=state.persona,
                 language=language,
                 resumption_handle=state.resumption_handle,
             )
             is_resumed = bool(state.resumption_handle)
-            logger.info(f"Connecting to Gemini Live (model={model_name}, voice={voice}, resumed={is_resumed})...")
+            logger.info(
+                f"Connecting to Gemini Live (model={model_name}, voice={state.persona.voice_id}, "
+                f"gender={state.persona.gender}, resumed={is_resumed})..."
+            )
+
 
             try:
                 async with client.aio.live.connect(model=model_name, config=connect_config) as session:

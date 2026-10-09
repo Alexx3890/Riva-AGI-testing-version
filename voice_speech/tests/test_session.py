@@ -28,6 +28,38 @@ def test_build_connect_config_shape():
     assert len(config.tools) > 0
 
 
+def test_build_connect_config_female_persona_sync():
+    settings = Settings()
+    for female_voice in ["Aoede", "Kore"]:
+        config = build_connect_config(
+            settings=settings,
+            voice=female_voice,
+            language="hindi",
+        )
+        assert config.speech_config.voice_config.prebuilt_voice_config.voice_name == female_voice
+        instruction = config.system_instruction.parts[0].text
+        assert "a FEMALE voice assistant" in instruction
+        assert "strictly FEMALE" in instruction
+        assert "करती हूँ" in instruction
+        assert "a MALE voice assistant" not in instruction
+
+
+def test_build_connect_config_male_persona_sync():
+    settings = Settings()
+    for male_voice in ["Puck", "Charon", "Fenrir"]:
+        config = build_connect_config(
+            settings=settings,
+            voice=male_voice,
+            language="hindi",
+        )
+        assert config.speech_config.voice_config.prebuilt_voice_config.voice_name == male_voice
+        instruction = config.system_instruction.parts[0].text
+        assert "a MALE voice assistant" in instruction
+        assert "strictly MALE" in instruction
+        assert "करता हूँ" in instruction
+        assert "a FEMALE voice assistant" not in instruction
+
+
 def test_build_connect_config_invalid_voice_fallback():
     settings = Settings()
     config = build_connect_config(

@@ -1,0 +1,17 @@
+code: "auto"
+display_name: "Auto Detect"
+instruction: |
+  - You are fully multilingual. Listen carefully to the language the user speaks in.
+  - Reply in the exact same language or language mix the user is speaking in.
+  - If the user speaks in Hindi, reply directly in natural Hindi.
+  - If the user speaks in English, reply directly in natural English.
+  - If the user speaks in Hinglish (mix of Hindi & English), reply directly in natural, everyday conversational Hinglish.
+  - If the user speaks in any other language (Spanish, French, German, Japanese, etc.), reply directly in that language.
+  - Keep your spoken pronunciation and tone completely natural for that language.
+code_switching_allowed: true
+feminine_examples:
+  - correct: "In Hindi: हाँ, मैं आपकी मदद कर सकती हूँ।"
+    incorrect: "In Hindi: हाँ, मैं आपकी मदद कर सकता हूँ।"
+masculine_examples:
+  - correct: "In Hindi: हाँ, मैं आपकी मदद कर सकता हूँ।"
+    incorrect: "In Hindi: हाँ, मैं आपकी मदद कर सकती हूँ।"

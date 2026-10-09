@@ -28,9 +28,34 @@ let currentVoiceEnergy = 0.0; // Smoothed EMA (0.0 to 1.0)
 // Transcript timer
 let transcriptTimer = null;
 
-// User Preferences (Persisted in localStorage)
+// Authoritative Voice & Persona Metadata
+const VOICE_METADATA = {
+  Aoede: { name: 'Aoede', gender: 'female', label: 'Female · Warm & Natural' },
+  Kore: { name: 'Kore', gender: 'female', label: 'Female · Crisp & Clear' },
+  Puck: { name: 'Puck', gender: 'male', label: 'Male · Energetic' },
+  Charon: { name: 'Charon', gender: 'male', label: 'Male · Deep & Calm' },
+  Fenrir: { name: 'Fenrir', gender: 'male', label: 'Male · Confident' },
+};
+
+function getVoiceGender(voiceName) {
+  const profile = VOICE_METADATA[voiceName];
+  return profile ? profile.gender : 'female';
+}
+
+// User Preferences (Persisted in localStorage with single authoritative source of truth)
 function getStoredVoice() {
-  return localStorage.getItem('riva_voice') || 'Aoede';
+  const saved = localStorage.getItem('riva_voice');
+  return VOICE_METADATA[saved] ? saved : 'Aoede';
+}
+
+function getStoredGender() {
+  const activeVoice = getStoredVoice();
+  const canonicalGender = getVoiceGender(activeVoice);
+  const savedGender = localStorage.getItem('riva_gender');
+  if (savedGender !== canonicalGender) {
+    localStorage.setItem('riva_gender', canonicalGender);
+  }
+  return canonicalGender;
 }
 
 function getStoredLanguage() {
@@ -38,6 +63,7 @@ function getStoredLanguage() {
 }
 
 let userVoice = getStoredVoice();
+let userGender = getStoredGender();
 let userLanguage = getStoredLanguage();
 
 // UI Elements
@@ -67,6 +93,7 @@ function refreshSettingsUI() {
   const currentVoice = getStoredVoice();
   const currentLang = getStoredLanguage();
   userVoice = currentVoice;
+  userGender = getStoredGender();
   userLanguage = currentLang;
 
   document.querySelectorAll('#voiceOptions .option-pill').forEach(pill => {
@@ -78,11 +105,13 @@ function refreshSettingsUI() {
 }
 
 function selectVoice(voice) {
-  if (!voice) return;
+  if (!voice || !VOICE_METADATA[voice]) return;
   userVoice = voice;
+  userGender = getVoiceGender(voice);
   localStorage.setItem('riva_voice', voice);
+  localStorage.setItem('riva_gender', userGender);
   refreshSettingsUI();
-  showToast(`Voice set to ${voice}`);
+  showToast(`Voice set to ${voice} (${userGender.toUpperCase()})`);
 
   if (isConnected) {
     isIntentionalDisconnect = true;
@@ -93,6 +122,7 @@ function selectVoice(voice) {
     }, 400);
   }
 }
+
 
 function selectLanguage(lang) {
   if (!lang) return;
@@ -656,9 +686,10 @@ async function connect() {
 
     // 4. Now connect WebSocket (after audio is fully ready)
     const activeVoice = getStoredVoice();
+    const activeGender = getStoredGender();
     const activeLang = getStoredLanguage();
     const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const wsUrl = `${protocol}//${location.host}/ws?voice=${encodeURIComponent(activeVoice)}&language=${encodeURIComponent(activeLang)}`;
+    const wsUrl = `${protocol}//${location.host}/ws?voice=${encodeURIComponent(activeVoice)}&gender=${encodeURIComponent(activeGender)}&language=${encodeURIComponent(activeLang)}`;
     ws = new WebSocket(wsUrl);
     ws.binaryType = 'arraybuffer';
 
