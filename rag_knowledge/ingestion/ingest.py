@@ -16,7 +16,7 @@ import openpyxl
 
 from ..storage.qdrant_storage import get_global_qdrant_store
 from .. import load_env
-from .privacy import assert_no_privacy_leaks, is_phone_number, is_email_address
+from .privacy import assert_no_privacy_leaks, is_phone_number, is_email_address, PrivacyGateError
 from .joiner import StudentEntityJoiner, make_opaque_ref_id
 
 logger = logging.getLogger("rag.ingest")
