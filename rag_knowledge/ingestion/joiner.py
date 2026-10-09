@@ -11,7 +11,9 @@ Protects against namesake collisions, isolates private values, and generates opa
 
 from collections import Counter
 import hashlib
+import hmac
 import logging
+import os
 import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
@@ -50,9 +52,14 @@ def normalize_person_name(name: str) -> str:
     return " ".join(capitalized)
 
 
-def make_opaque_ref_id(primary_key: str) -> str:
-    """Creates a deterministic, non-reversible synthetic reference ID."""
-    digest = hashlib.sha256(f"riva_entity_ref:{primary_key}".encode("utf-8")).hexdigest()
+def make_opaque_ref_id(primary_key: str, secret_key: Optional[str] = None) -> str:
+    """Creates a deterministic, non-reversible synthetic reference ID using HMAC-SHA256."""
+    secret = secret_key or os.getenv("RAG_ENTITY_SECRET", "riva_opaque_entity_salt_2026")
+    digest = hmac.new(
+        secret.encode("utf-8"),
+        str(primary_key).strip().encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
     return f"ref_{digest[:16]}"
 
 
@@ -199,6 +206,136 @@ class StudentEntityJoiner:
             f"Safe IDs: {len(self.safe_identifiers)}, Known Private Values: {len(self.known_private_values)}"
         )
         return self.canonical_students
+
+    def to_knowledge_documents(self) -> List[Dict[str, Any]]:
+        """Converts joined canonical student entities into standard RAG knowledge documents."""
+        if not self.canonical_students:
+            self.build_joined_students()
+
+        inst_name = os.getenv("INSTITUTION_NAME", "").strip()
+        documents = []
+        for s in self.canonical_students:
+            name = s.get("name", "")
+            if not name:
+                continue
+            display_name = normalize_person_name(name)
+            roll = s.get("roll_number", "")
+            uid = s.get("student_uid", "")
+            branch = s.get("branch", "")
+            degree = s.get("degree", "")
+            sec = s.get("section", "")
+            sem = s.get("semester", "")
+            mentor = s.get("mentor", "")
+            batch = s.get("academic_batch", "")
+            year = s.get("year", "")
+            status = s.get("admission_status", "ACTIVE")
+            ref_id = s.get("entity_ref_id") or make_opaque_ref_id(roll or uid or name)
+
+            aliases = []
+            if uid:
+                aliases.append(uid)
+            if roll:
+                aliases.append(roll)
+            if display_name:
+                aliases.extend([display_name, display_name.upper(), display_name.lower()])
+
+            keywords = ["student"]
+            if branch:
+                keywords.append(branch)
+            if sec:
+                keywords.extend([sec, f"section {sec}"])
+            if mentor:
+                keywords.extend([f"mentor {mentor}", mentor])
+            if sem:
+                keywords.append(f"sem {sem}")
+            if batch:
+                keywords.append(batch)
+
+            # Build readable summary without double spaces or trailing 'in .'
+            parts = []
+            degree_part = f"{degree} " if degree else ""
+            year_part = f"Year {year} " if year else ""
+            student_label = f"{year_part}{degree_part}student".strip()
+            if branch:
+                parts.append(f"{display_name} is a {student_label} in {branch}")
+            else:
+                parts.append(f"{display_name} is a {student_label}")
+
+            details = []
+            if sec:
+                details.append(f"Section {sec}")
+            if batch:
+                details.append(f"Batch {batch}")
+            if details:
+                parts.append(f"({', '.join(details)})")
+            if mentor:
+                parts.append(f"mentored by {mentor}")
+            if inst_name:
+                parts.append(f"at {inst_name}.")
+            else:
+                parts[-1] = parts[-1].rstrip(".") + "."
+
+            summary = " ".join(parts)
+
+            content_lines = [f"Student Name: {display_name}"]
+            if uid:
+                content_lines.append(f"UID: {uid}")
+            if roll:
+                content_lines.append(f"University Roll Number: {roll}")
+            if degree:
+                content_lines.append(f"Degree: {degree}")
+            if branch:
+                content_lines.append(f"Branch: {branch}")
+            if sec:
+                content_lines.append(f"Class Section: {sec}")
+            if sem:
+                content_lines.append(f"Semester: Semester {sem}")
+            if year:
+                content_lines.append(f"Current Year: Year {year}")
+            if mentor:
+                content_lines.append(f"Faculty Mentor: {mentor}")
+            if batch:
+                content_lines.append(f"Academic Batch: {batch}")
+            if status:
+                content_lines.append(f"Admission Status: {status}")
+
+            doc_id = f"student_{uid.lower()}" if uid else f"student_{roll.lower()}"
+            title = f"{display_name} - {branch}" if branch else display_name
+
+            doc_meta = {
+                "name": display_name,
+                "admission_status": status,
+                "entity_ref_id": ref_id,
+            }
+            if uid:
+                doc_meta["uid"] = uid
+            if roll:
+                doc_meta["roll_number"] = roll
+            if branch:
+                doc_meta["branch"] = branch
+            if sec:
+                doc_meta["section"] = sec
+            if degree:
+                doc_meta["degree"] = degree
+            if batch:
+                doc_meta["academic_batch"] = batch
+            if sem:
+                doc_meta["semester"] = sem
+            if mentor:
+                doc_meta["mentor"] = mentor
+
+            documents.append({
+                "id": doc_id,
+                "category": "student",
+                "title": title,
+                "aliases": sorted(list(set(aliases))),
+                "keywords": sorted(list(set(keywords))),
+                "summary": summary,
+                "content": "\n".join(content_lines),
+                "metadata": doc_meta,
+                "is_active": True,
+            })
+        return documents
 
     def _load_uid_file(self, path: Path) -> Dict[str, Dict[str, Any]]:
         wb = openpyxl.load_workbook(path, data_only=True)

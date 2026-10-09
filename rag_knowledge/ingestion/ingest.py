@@ -16,8 +16,8 @@ import openpyxl
 
 from ..storage.qdrant_storage import get_global_qdrant_store
 from .. import load_env
-from .privacy import assert_no_privacy_leaks
-from .joiner import make_opaque_ref_id
+from .privacy import assert_no_privacy_leaks, is_phone_number, is_email_address
+from .joiner import StudentEntityJoiner, make_opaque_ref_id
 
 logger = logging.getLogger("rag.ingest")
 
@@ -696,117 +696,144 @@ def get_vision_fallback_models() -> list[str]:
     return get_fallback_gemini_models()
 
 
-def extract_image_text(filepath: Path) -> str:
-    """Extracts textual and structured content from an image via Gemini Vision or local OCR."""
+def extract_image_text(filepath: Path, allow_cloud_vision: bool = False) -> Tuple[str, str, float]:
+    """Extracts textual and structured content from an image via local OCR (default) or opt-in Gemini Vision.
+
+    Returns:
+        (extracted_text, extraction_method, confidence)
+    """
     load_env()
-    api_key = get_vision_api_key()
+    cloud_opted_in = allow_cloud_vision or os.getenv("ALLOW_CLOUD_VISION", "0").lower() in ("1", "true", "yes")
 
-    # 1. Primary: Gemini Vision API (using dedicated vision key & model)
-    if api_key:
-        try:
-            import base64
-            import urllib.error
-            import urllib.request
-
-            ext = filepath.suffix.lower().lstrip(".")
-            mime_map = {
-                "png": "image/png",
-                "jpg": "image/jpeg",
-                "jpeg": "image/jpeg",
-                "webp": "image/webp",
-                "gif": "image/gif",
-                "bmp": "image/bmp",
-            }
-            mime_type = mime_map.get(ext, "image/png")
-
-            with open(filepath, "rb") as f:
-                b64_data = base64.b64encode(f.read()).decode("utf-8")
-
-            primary_model = get_vision_model()
-            fallback_models = get_vision_fallback_models()
-            model_candidates = ([primary_model] if primary_model else []) + fallback_models
-            valid_models = []
-            for m in model_candidates:
-                if m and "live" not in m.lower() and m not in valid_models:
-                    valid_models.append(m)
-
-            prompt_text = (
-                "Transcribe and extract all content from this document/image accurately. "
-                "Include all questions, numbered items, formulas, answers, solutions, tables, "
-                "headings, and details in clean Markdown format."
-            )
-
-            for model_name in valid_models:
-                url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent"
-                payload = {
-                    "contents": [
-                        {
-                            "parts": [
-                                {"inlineData": {"mimeType": mime_type, "data": b64_data}},
-                                {"text": prompt_text},
-                            ]
-                        }
-                    ],
-                    "generationConfig": {
-                        "temperature": 0.0,
-                        "maxOutputTokens": 2048,
-                    },
-                }
-                req = urllib.request.Request(
-                    url,
-                    data=json.dumps(payload).encode("utf-8"),
-                    headers={"Content-Type": "application/json", "x-goog-api-key": api_key},
-                    method="POST",
-                )
-                try:
-                    with urllib.request.urlopen(req, timeout=30.0) as resp:
-                        res = json.loads(resp.read().decode("utf-8"))
-                        cand = res.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "")
-                        if cand.strip():
-                            logger.info(f"Successfully extracted text from image {filepath.name} using Gemini Vision ({model_name}).")
-                            return cand.strip()
-                except urllib.error.HTTPError as he:
-                    logger.warning(f"Gemini Vision call for {model_name} HTTP {he.code}: {he.reason}")
-                    continue
-                except Exception as ex:
-                    logger.warning(f"Gemini Vision call for {model_name} failed: {ex}")
-                    continue
-        except Exception as e:
-            logger.warning(f"Error invoking Gemini Vision for {filepath.name}: {e}")
-
-    # 2. Local OCR fallback (pytesseract)
+    # 1. Default: Local OCR (pytesseract) to protect student privacy
     try:
         import pytesseract
         from PIL import Image
         with Image.open(filepath) as img:
             ocr_text = pytesseract.image_to_string(img).strip()
             if ocr_text:
-                logger.info(f"Extracted OCR text from {filepath.name} via pytesseract.")
-                return ocr_text
-    except Exception:
-        pass
+                confidence = 0.75
+                try:
+                    data = pytesseract.image_to_data(img, output_type=pytesseract.Output.DICT)
+                    confs = [float(c) for c in data.get("conf", []) if str(c).strip() not in ("", "-1")]
+                    if confs:
+                        confidence = round(sum(confs) / len(confs) / 100.0, 2)
+                except Exception:
+                    pass
+                logger.info(f"Extracted OCR text from {filepath.name} via local pytesseract (confidence={confidence}).")
+                return ocr_text, "local_ocr", confidence
+    except Exception as e:
+        logger.warning(f"Local OCR failed or unavailable for {filepath.name}: {e}")
 
-    # 3. Descriptive metadata fallback
-    try:
-        from PIL import Image
-        with Image.open(filepath) as img:
-            w, h = img.size
-            fmt = img.format or filepath.suffix.lstrip(".").upper()
-            return f"Image document '{filepath.name}' ({fmt}, {w}x{h} pixels)."
-    except Exception:
-        return f"Image document '{filepath.name}'."
+    # 2. Opt-in: Gemini Vision API (only if explicitly allowed via flag or ALLOW_CLOUD_VISION=1)
+    if cloud_opted_in:
+        api_key = get_vision_api_key()
+        if api_key:
+            try:
+                import base64
+                import urllib.error
+                import urllib.request
+
+                ext = filepath.suffix.lower().lstrip(".")
+                mime_map = {
+                    "png": "image/png",
+                    "jpg": "image/jpeg",
+                    "jpeg": "image/jpeg",
+                    "webp": "image/webp",
+                    "gif": "image/gif",
+                    "bmp": "image/bmp",
+                }
+                mime_type = mime_map.get(ext, "image/png")
+
+                with open(filepath, "rb") as f:
+                    b64_data = base64.b64encode(f.read()).decode("utf-8")
+
+                primary_model = get_vision_model()
+                fallback_models = get_vision_fallback_models()
+                model_candidates = ([primary_model] if primary_model else []) + fallback_models
+                valid_models = []
+                for m in model_candidates:
+                    if m and "live" not in m.lower() and m not in valid_models:
+                        valid_models.append(m)
+
+                prompt_text = (
+                    "Transcribe and extract all content from this document/image accurately. "
+                    "Include all questions, numbered items, formulas, answers, solutions, tables, "
+                    "headings, and details in clean Markdown format."
+                )
+
+                for model_name in valid_models:
+                    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent"
+                    payload = {
+                        "contents": [
+                            {
+                                "parts": [
+                                    {"inlineData": {"mimeType": mime_type, "data": b64_data}},
+                                    {"text": prompt_text},
+                                ]
+                            }
+                        ],
+                        "generationConfig": {
+                            "temperature": 0.0,
+                            "maxOutputTokens": 4096,
+                        },
+                    }
+                    req = urllib.request.Request(
+                        url,
+                        data=json.dumps(payload).encode("utf-8"),
+                        headers={"Content-Type": "application/json", "x-goog-api-key": api_key},
+                        method="POST",
+                    )
+                    try:
+                        with urllib.request.urlopen(req, timeout=30.0) as resp:
+                            res = json.loads(resp.read().decode("utf-8"))
+                            cand = res.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "")
+                            if cand.strip():
+                                logger.info(f"Successfully extracted text from image {filepath.name} using Gemini Vision ({model_name}).")
+                                return cand.strip(), "gemini_vision", 0.95
+                    except urllib.error.HTTPError as he:
+                        logger.warning(f"Gemini Vision call for {model_name} HTTP {he.code}: {he.reason}")
+                        continue
+                    except Exception as ex:
+                        logger.warning(f"Gemini Vision call for {model_name} failed: {ex}")
+                        continue
+            except Exception as e:
+                logger.warning(f"Error invoking Gemini Vision for {filepath.name}: {e}")
+    else:
+        logger.info(f"Cloud vision is disabled for {filepath.name}. To enable, set ALLOW_CLOUD_VISION=1 or pass --cloud-vision.")
+
+    # 3. If extraction failed or yielded nothing, report and skip rather than creating a junk record
+    logger.warning(f"No textual content could be extracted from image {filepath.name}. Skipping indexing.")
+    return "", "none", 0.0
 
 
-def load_image_documents(filepath: Path) -> List[Dict[str, Any]]:
-    """Loads knowledge documents from an image file using multimodal Vision or OCR."""
+def load_image_documents(filepath: Path, allow_cloud_vision: bool = False) -> List[Dict[str, Any]]:
+    """Loads knowledge documents from an image file using multimodal Vision or local OCR."""
     if not filepath.is_file():
         return []
 
-    raw_text = extract_image_text(filepath)
-    if not raw_text:
+    try:
+        res = extract_image_text(filepath, allow_cloud_vision=allow_cloud_vision)
+    except TypeError:
+        res = extract_image_text(filepath)
+    if isinstance(res, tuple):
+        raw_text, method, confidence = res
+    else:
+        raw_text, method, confidence = str(res or ""), "custom", 0.85
+
+    if not raw_text or not raw_text.strip():
+        # Do not index empty images or fallback junk records
         return []
 
-    img_meta: Dict[str, Any] = {"source": filepath.name, "file_type": "image"}
+    img_meta: Dict[str, Any] = {
+        "source": filepath.name,
+        "file_type": "image",
+        "extraction_method": method,
+        "confidence": confidence,
+    }
+    if confidence < 0.6:
+        img_meta["flagged_for_review"] = True
+
     try:
         from PIL import Image
         with Image.open(filepath) as img:
@@ -825,6 +852,10 @@ def load_image_documents(filepath: Path) -> List[Dict[str, Any]]:
     if len(raw_sections) <= 1:
         raw_sections = [s.strip() for s in re.split(r"\n(?=#{1,3}\s+)", raw_text) if s.strip()]
 
+    extra_keywords = ["image", "transcription", clean_stem]
+    if confidence < 0.6:
+        extra_keywords.append("needs_review")
+
     if len(raw_sections) > 1:
         # Full content overview
         documents.append({
@@ -834,7 +865,7 @@ def load_image_documents(filepath: Path) -> List[Dict[str, Any]]:
             "summary": f"Image transcription of {filepath.name} with {len(raw_sections)} sections.",
             "content": raw_text,
             "aliases": [filepath.stem, filepath.name],
-            "keywords": ["image", "transcription", clean_stem],
+            "keywords": extra_keywords,
             "metadata": dict(img_meta),
             "is_active": True,
         })
@@ -854,7 +885,7 @@ def load_image_documents(filepath: Path) -> List[Dict[str, Any]]:
                 "summary": summary[:250],
                 "content": sec,
                 "aliases": [sec_title, filepath.stem],
-                "keywords": ["image", clean_stem] + [w.lower() for w in re.findall(r"\b[A-Za-z]{3,}\b", sec_title)[:5]],
+                "keywords": extra_keywords + [w.lower() for w in re.findall(r"\b[A-Za-z]{3,}\b", sec_title)[:5]],
                 "metadata": sec_meta,
                 "is_active": True,
             })
@@ -871,7 +902,7 @@ def load_image_documents(filepath: Path) -> List[Dict[str, Any]]:
             "summary": raw_text[:250].replace("\n", " "),
             "content": raw_text,
             "aliases": [filepath.stem, filepath.name],
-            "keywords": ["image", "transcription", clean_stem],
+            "keywords": extra_keywords,
             "metadata": dict(img_meta),
             "is_active": True,
         })
@@ -913,6 +944,9 @@ def load_generic_tabular_dataset(filepath: Path, max_row_docs: int = 1500) -> Li
             sheet_datasets.append((table_name, rows[0], rows[1:]))
 
     elif ext in (".xlsx", ".xls"):
+        if ext == ".xls":
+            logger.warning(f"File {filepath.name} is a legacy binary Excel format (.xls). openpyxl does not support binary .xls. Please convert to .xlsx or .csv.")
+            return []
         try:
             wb = openpyxl.load_workbook(filepath, data_only=True)
             for sname in wb.sheetnames:
@@ -926,7 +960,7 @@ def load_generic_tabular_dataset(filepath: Path, max_row_docs: int = 1500) -> Li
                     sheet_datasets.append((sub_title, s_rows[0], s_rows[1:]))
             wb.close()
         except Exception as e:
-            logger.error(f"Error reading workbook {filepath.name}: {e}")
+            logger.warning(f"Could not read workbook {filepath.name}: {e}")
             return []
 
     if not sheet_datasets:
@@ -1014,80 +1048,152 @@ def load_generic_tabular_dataset(filepath: Path, max_row_docs: int = 1500) -> Li
             "is_active": True,
         })
 
+        # Helper to filter out sensitive attributes for waitlist and aggregations
+        def _get_safe_row_attributes(r_row: List[str]) -> List[str]:
+            attrs = []
+            for ci in range(len(r_row)):
+                if ci != name_col_idx and ci < len(headers) and r_row[ci]:
+                    h_ci_low = headers[ci].lower()
+                    if any(k in h_ci_low for k in ["email", "phone", "mobile", "contact", "father", "parent", "guardian", "gender", "address", "dob", "birth"]):
+                        continue
+                    v = str(r_row[ci]).strip()
+                    if is_email_address(v) or is_phone_number(v):
+                        continue
+                    attrs.append(f"{headers[ci]}: {v}")
+            return attrs
+
         # 4. Generate Targeted Aggregation Documents (Waiting List, Attendance, Status, Categories)
         for c_idx, (h, cnt) in categorical_cols.items():
             h_low = h.lower()
             clean_h_key = re.sub(r"[^a-zA-Z0-9]+", "_", h).strip("_").lower()
 
-            # A. Dedicated Waiting List Document
+            # A. Dedicated Waiting List Document (with column filtering and part chunking)
             has_waiting = any("wait" in str(v).lower() for v in cnt)
             if has_waiting:
                 wl_rows = [r for r in data_rows if len(r) > c_idx and "wait" in str(r[c_idx]).lower()]
-                wl_lines = [
-                    f"{sub_title} - Waiting List ({h})",
-                    "",
-                    f"Total Students on Waiting List: {len(wl_rows)} students",
-                    "",
-                    "List of Waitlisted Entries:",
-                ]
+                wl_entries = []
                 for i, r in enumerate(wl_rows, 1):
                     entity = _safe_name(r[name_col_idx]) if len(r) > name_col_idx and r[name_col_idx] else f"Record {i}"
-                    attrs = []
-                    for ci in range(len(r)):
-                        if ci != name_col_idx and ci < len(headers) and r[ci]:
-                            v = r[ci]
-                            if "@" not in v and not re.match(r"^\+?\d{10,12}$", v):
-                                attrs.append(f"{headers[ci]}: {v}")
-                    wl_lines.append(f"{i}. {entity} (" + ", ".join(attrs[:5]) + ")")
+                    safe_attrs = _get_safe_row_attributes(r)
+                    attr_str = f" ({', '.join(safe_attrs[:5])})" if safe_attrs else ""
+                    wl_entries.append(f"{i}. {entity}{attr_str}")
 
-                wl_lines.extend([
-                    "",
-                    f"Summary: Exactly {len(wl_rows)} entries are placed on the waiting list in {sub_title}.",
-                ])
+                wl_chunk_size = 40
+                if len(wl_rows) <= wl_chunk_size:
+                    wl_lines = [
+                        f"{sub_title} - Waiting List ({h})",
+                        "",
+                        f"Total Students on Waiting List: {len(wl_rows)} students",
+                        "",
+                        "List of Waitlisted Entries:",
+                    ]
+                    wl_lines.extend(wl_entries)
+                    wl_lines.extend([
+                        "",
+                        f"Summary: Exactly {len(wl_rows)} entries are placed on the waiting list in {sub_title}.",
+                    ])
 
-                documents.append({
-                    "id": f"table_{clean_slug}_waiting_list",
-                    "title": f"{sub_title} - Waiting List ({h})",
-                    "category": "aggregation",
-                    "summary": f"There are exactly {len(wl_rows)} students on the waiting list (waitlist) in {sub_title}.",
-                    "content": "\n".join(wl_lines),
-                    "aliases": [f"{sub_title} Waiting List", f"{sub_title} Waitlist", "Waiting List"],
-                    "keywords": ["waiting", "list", "waitlist", "waitlisted", clean_slug],
-                    "metadata": {"source": filepath.name, "waitlisted_count": len(wl_rows)},
-                    "is_active": True,
-                })
+                    documents.append({
+                        "id": f"table_{clean_slug}_waiting_list",
+                        "title": f"{sub_title} - Waiting List ({h})",
+                        "category": "aggregation",
+                        "summary": f"There are exactly {len(wl_rows)} students on the waiting list (waitlist) in {sub_title}.",
+                        "content": "\n".join(wl_lines),
+                        "aliases": [f"{sub_title} Waiting List", f"{sub_title} Waitlist", "Waiting List"],
+                        "keywords": ["waiting", "list", "waitlist", "waitlisted", clean_slug],
+                        "metadata": {"source": filepath.name, "waitlisted_count": len(wl_rows)},
+                        "is_active": True,
+                    })
+                else:
+                    num_parts = (len(wl_rows) + wl_chunk_size - 1) // wl_chunk_size
+                    for part_idx in range(num_parts):
+                        chunk_entries = wl_entries[part_idx * wl_chunk_size : (part_idx + 1) * wl_chunk_size]
+                        chunk_lines = [
+                            f"{sub_title} - Waiting List ({h}) (Part {part_idx + 1}/{num_parts})",
+                            "",
+                            f"Total Students on Waiting List: {len(wl_rows)} students (Displaying {len(chunk_entries)} in this part)",
+                            "",
+                            "List of Waitlisted Entries:",
+                        ]
+                        chunk_lines.extend(chunk_entries)
+                        chunk_lines.extend([
+                            "",
+                            f"Summary: Exactly {len(wl_rows)} total entries on the waiting list in {sub_title} (Part {part_idx + 1}/{num_parts}).",
+                        ])
+                        documents.append({
+                            "id": f"table_{clean_slug}_waiting_list_part{part_idx + 1}",
+                            "title": f"{sub_title} - Waiting List ({h}) (Part {part_idx + 1}/{num_parts}, Total: {len(wl_rows)})",
+                            "category": "aggregation",
+                            "summary": f"Waiting list for {sub_title} ({len(wl_rows)} total, Part {part_idx + 1}/{num_parts}).",
+                            "content": "\n".join(chunk_lines),
+                            "aliases": [f"{sub_title} Waiting List Part {part_idx + 1}", f"{sub_title} Waitlist"],
+                            "keywords": ["waiting", "list", "waitlist", "waitlisted", clean_slug],
+                            "metadata": {"source": filepath.name, "waitlisted_count": len(wl_rows), "part": part_idx + 1, "total_parts": num_parts},
+                            "is_active": True,
+                        })
 
-            # B. Dedicated Attendance Document
+            # B. Dedicated Attendance Document (with part chunking for large rosters)
             is_attendance = "attendance" in h_low or (len(cnt) <= 4 and set(cnt.keys()).issubset({"P", "A", "Present", "Absent", "p", "a"}))
             if is_attendance and len(cnt) <= 6:
-                att_lines = [
-                    f"{sub_title} - Attendance Summary ({h})",
-                    "",
-                    f"Total Attendance Entries: {sum(cnt.values())}",
-                    "",
-                    "Attendance Breakdown:",
-                ]
-                for val, count in cnt.most_common():
-                    att_lines.append(f"* {val}: {count} candidates")
-
                 p_rows = [r for r in data_rows if len(r) > c_idx and str(r[c_idx]).upper() in ("P", "PRESENT")]
-                if p_rows:
-                    att_lines.append(f"\nCandidates Marked Present / 'P' ({len(p_rows)} total):")
-                    for i, r in enumerate(p_rows, 1):
-                        entity = _safe_name(r[name_col_idx]) if len(r) > name_col_idx and r[name_col_idx] else f"Entry {i}"
-                        att_lines.append(f"{i}. {entity}")
+                p_entries = [
+                    f"{i}. {_safe_name(r[name_col_idx]) if len(r) > name_col_idx and r[name_col_idx] else f'Entry {i}'}"
+                    for i, r in enumerate(p_rows, 1)
+                ]
 
-                documents.append({
-                    "id": f"table_{clean_slug}_attendance_{clean_h_key}",
-                    "title": f"{sub_title} - Attendance Summary ({h})",
-                    "category": "aggregation",
-                    "summary": f"Attendance summary for {sub_title} ({h}): " + ", ".join(f"{k}: {v}" for k, v in cnt.items()),
-                    "content": "\n".join(att_lines),
-                    "aliases": [f"{sub_title} Attendance", "Attendance Summary", "Attendance"],
-                    "keywords": ["attendance", "present", "absent", "roster", clean_slug],
-                    "metadata": {"source": filepath.name, "present_count": len(p_rows) if p_rows else 0},
-                    "is_active": True,
-                })
+                att_chunk_size = 40
+                if len(p_entries) <= att_chunk_size:
+                    att_lines = [
+                        f"{sub_title} - Attendance Summary ({h})",
+                        "",
+                        f"Total Attendance Entries: {sum(cnt.values())}",
+                        "",
+                        "Attendance Breakdown:",
+                    ]
+                    for val, count in cnt.most_common():
+                        att_lines.append(f"* {val}: {count} candidates")
+                    if p_entries:
+                        att_lines.append(f"\nCandidates Marked Present / 'P' ({len(p_entries)} total):")
+                        att_lines.extend(p_entries)
+
+                    documents.append({
+                        "id": f"table_{clean_slug}_attendance_{clean_h_key}",
+                        "title": f"{sub_title} - Attendance Summary ({h})",
+                        "category": "aggregation",
+                        "summary": f"Attendance summary for {sub_title} ({h}): " + ", ".join(f"{k}: {v}" for k, v in cnt.items()),
+                        "content": "\n".join(att_lines),
+                        "aliases": [f"{sub_title} Attendance", "Attendance Summary", "Attendance"],
+                        "keywords": ["attendance", "present", "absent", "roster", clean_slug],
+                        "metadata": {"source": filepath.name, "present_count": len(p_rows) if p_rows else 0},
+                        "is_active": True,
+                    })
+                else:
+                    num_parts = (len(p_entries) + att_chunk_size - 1) // att_chunk_size
+                    for part_idx in range(num_parts):
+                        chunk_entries = p_entries[part_idx * att_chunk_size : (part_idx + 1) * att_chunk_size]
+                        att_lines = [
+                            f"{sub_title} - Attendance Summary ({h}) (Part {part_idx + 1}/{num_parts})",
+                            "",
+                            f"Total Attendance Entries: {sum(cnt.values())} (Displaying {len(chunk_entries)} present in this part)",
+                            "",
+                            "Attendance Breakdown:",
+                        ]
+                        for val, count in cnt.most_common():
+                            att_lines.append(f"* {val}: {count} candidates")
+                        att_lines.append(f"\nCandidates Marked Present (Part {part_idx + 1}/{num_parts}, Total: {len(p_entries)}):")
+                        att_lines.extend(chunk_entries)
+
+                        documents.append({
+                            "id": f"table_{clean_slug}_attendance_{clean_h_key}_part{part_idx + 1}",
+                            "title": f"{sub_title} - Attendance Summary ({h}) (Part {part_idx + 1}/{num_parts}, Total: {len(p_entries)})",
+                            "category": "aggregation",
+                            "summary": f"Attendance summary for {sub_title} ({h}) (Part {part_idx + 1}/{num_parts}, {len(p_entries)} total present).",
+                            "content": "\n".join(att_lines),
+                            "aliases": [f"{sub_title} Attendance Part {part_idx + 1}", "Attendance Summary"],
+                            "keywords": ["attendance", "present", "absent", "roster", clean_slug],
+                            "metadata": {"source": filepath.name, "present_count": len(p_rows), "part": part_idx + 1, "total_parts": num_parts},
+                            "is_active": True,
+                        })
 
             # C. Category / Domain / Branch Breakdown
             is_category = any(k in h_low for k in ["domain", "branch", "department", "category", "role", "section", "status", "result"])
@@ -1147,7 +1253,7 @@ def load_generic_tabular_dataset(filepath: Path, max_row_docs: int = 1500) -> Li
                     "is_active": True,
                 })
 
-        # 5. Row-level Structured Entity Documents (Process all rows without silent truncation)
+        # 5. Row-level Structured Entity Documents (Process all rows with stable IDs and identifier exemptions)
         for idx, r in enumerate(data_rows):
             entity_name = r[name_col_idx] if len(r) > name_col_idx and r[name_col_idx] else f"Record #{idx + 1}"
             if not entity_name or entity_name.lower() in ("not found", "none", "nan"):
@@ -1155,18 +1261,31 @@ def load_generic_tabular_dataset(filepath: Path, max_row_docs: int = 1500) -> Li
 
             row_fields = []
             row_meta: Dict[str, Any] = {"source": filepath.name, "row_index": idx + 1}
+            id_val = None
+
             for ci, h in enumerate(headers):
                 if ci < len(r) and r[ci]:
                     val = str(r[ci]).strip()
-                    # Strictly filter private contact details from both metadata payload and embedded text
                     h_lower = h.lower()
-                    if any(k in h_lower for k in ["email", "phone", "mobile", "contact", "father", "parent", "gender", "address"]):
+
+                    # Check if column is an identifier column (roll, uid, id, reg, etc.)
+                    is_id_col = any(k in h_lower for k in ["roll", "uid", "urn", "reg", "serial", "code", "index", "id", "candidate_id", "applicant_id", "sno"])
+                    if is_id_col and not id_val:
+                        id_val = clean_identifier(val)
+
+                    # Strictly filter private contact details from both metadata payload and embedded text
+                    if any(k in h_lower for k in ["email", "phone", "mobile", "contact", "father", "parent", "guardian", "gender", "address", "dob", "birth"]):
                         continue
-                    if "@" in val and "." in val:
+                    if is_email_address(val):
                         continue
-                    digits = re.sub(r"[^\d]", "", val)
-                    if len(digits) >= 10 and (val.startswith("+") or digits.startswith(("6", "7", "8", "9"))):
-                        continue
+
+                    # If not an identifier column, check for phone numbers
+                    if not is_id_col:
+                        if is_phone_number(val):
+                            continue
+                        digits = re.sub(r"[^\d]", "", val)
+                        if len(digits) >= 10 and (val.startswith("+") or digits.startswith(("6", "7", "8", "9"))):
+                            continue
 
                     row_meta[h] = val
                     row_fields.append(f"* **{h}**: {val}")
@@ -1177,7 +1296,12 @@ def load_generic_tabular_dataset(filepath: Path, max_row_docs: int = 1500) -> Li
             entity_title = f"{entity_name} - {sub_title}"
             row_content = f"### {entity_name}\n**Dataset**: {sub_title}\n\n" + "\n".join(row_fields)
             clean_entity_id = re.sub(r"[^a-zA-Z0-9]+", "_", entity_name).strip("_").lower()
-            doc_seed = f"{clean_slug}_{clean_entity_id}_{idx + 1}"
+
+            # Deterministic, position-independent ID based on unique identifier or normalized entity name
+            if id_val:
+                doc_seed = f"{clean_slug}_{id_val}"
+            else:
+                doc_seed = f"{clean_slug}_{clean_entity_id}"
             stable_doc_id = f"rec_{clean_slug[:16]}_{hashlib.sha256(doc_seed.encode()).hexdigest()[:16]}"
 
             documents.append({
@@ -1195,7 +1319,13 @@ def load_generic_tabular_dataset(filepath: Path, max_row_docs: int = 1500) -> Li
     return documents
 
 
-def load_source_documents(source: Path, data_type: str = "auto") -> List[Dict[str, Any]]:
+def load_source_documents(
+    source: Path,
+    data_type: str = "auto",
+    allow_cloud_vision: bool = False,
+    safe_identifiers: Optional[Set[str]] = None,
+    known_private_values: Optional[Set[str]] = None,
+) -> List[Dict[str, Any]]:
     """Loads knowledge documents from a file or folder supporting JSON, CSV, Markdown, text, PDF, and Excel."""
     source_path = Path(source)
     dtype = (data_type or "auto").lower()
@@ -1211,33 +1341,34 @@ def load_source_documents(source: Path, data_type: str = "auto") -> List[Dict[st
         if dtype == "pdf" or ext == ".pdf":
             return load_pdf_documents(source_path)
         if dtype in ("image", "vision") or ext in (".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".tiff"):
-            return load_image_documents(source_path)
+            return load_image_documents(source_path, allow_cloud_vision=allow_cloud_vision)
         return []
 
     if source_path.is_dir():
         docs: List[Dict[str, Any]] = []
         handled_files: Set[Path] = set()
 
-        # 1. Process unified student datasets if present
+        # 1. Process unified student datasets using canonical StudentEntityJoiner
         has_uid = (source_path / "UID.xlsx").exists()
         has_nominal = any("Nominal" in f.name for f in source_path.glob("*.xlsx"))
-        if dtype in ("student", "auto") and (has_uid or has_nominal):
-            uid_path = source_path / "UID.xlsx"
-            nom_paths = list(source_path.glob("*Nominal*.xlsx"))
-            master_paths = list(source_path.glob("*STUDENT*.xlsx"))
+        has_student = any("STUDENT" in f.name for f in source_path.glob("*.xlsx"))
+        if dtype in ("student", "auto") and (has_uid or has_nominal or has_student):
+            joiner = StudentEntityJoiner(source_path)
+            student_docs = joiner.to_knowledge_documents()
+            if student_docs:
+                docs.extend(student_docs)
+                if safe_identifiers is not None:
+                    safe_identifiers.update(joiner.safe_identifiers)
+                if known_private_values is not None:
+                    known_private_values.update(joiner.known_private_values)
 
-            if uid_path.exists():
-                handled_files.add(uid_path)
-            for p in nom_paths:
-                handled_files.add(p)
-            for p in master_paths:
-                handled_files.add(p)
-
-            uid_records = load_uid_mapping(uid_path) if uid_path.exists() else {}
-            nom_records = load_nominal_roll(nom_paths[0]) if nom_paths else {}
-            master_records = load_student_list(master_paths[0]) if master_paths else []
-            if uid_records or nom_records or master_records:
-                docs.extend(build_unified_student_documents(nom_records, uid_records, master_records))
+                uid_path = source_path / "UID.xlsx"
+                if uid_path.exists():
+                    handled_files.add(uid_path)
+                for p in source_path.glob("*Nominal*.xlsx"):
+                    handled_files.add(p)
+                for p in source_path.glob("*STUDENT*.xlsx"):
+                    handled_files.add(p)
 
         if dtype == "student":
             return docs
@@ -1250,25 +1381,13 @@ def load_source_documents(source: Path, data_type: str = "auto") -> List[Dict[st
             if ext == ".json":
                 docs.extend(load_json_documents(file))
             elif ext in (".csv", ".tsv", ".xlsx", ".xls"):
-                pdf_sibling = file.with_suffix(".pdf")
-                if pdf_sibling.exists():
-                    handled_files.add(pdf_sibling)
                 docs.extend(load_generic_tabular_dataset(file))
             elif ext in (".md", ".txt"):
                 docs.extend(load_text_or_markdown(file))
             elif ext == ".pdf":
-                csv_sibling = file.with_suffix(".csv")
-                xlsx_sibling = file.with_suffix(".xlsx")
-                if csv_sibling.exists():
-                    handled_files.add(csv_sibling)
-                    docs.extend(load_generic_tabular_dataset(csv_sibling))
-                elif xlsx_sibling.exists():
-                    handled_files.add(xlsx_sibling)
-                    docs.extend(load_generic_tabular_dataset(xlsx_sibling))
-                else:
-                    docs.extend(load_pdf_documents(file))
+                docs.extend(load_pdf_documents(file))
             elif ext in (".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".tiff"):
-                docs.extend(load_image_documents(file))
+                docs.extend(load_image_documents(file, allow_cloud_vision=allow_cloud_vision))
         return docs
 
     return []
@@ -1281,13 +1400,23 @@ def run_ingestion(
     batch_size: int = 100,
     data_type: str = "auto",
     redact: bool = False,
+    allow_cloud_vision: bool = False,
 ) -> int:
     """Coordinates reading datasets, building documents, and upserting into Qdrant."""
     load_env()
     cleaned_source = str(source_dir).strip(' "\'\r\n\t') if isinstance(source_dir, (str, Path)) else source_dir
     source_path = Path(cleaned_source)
 
-    documents = load_source_documents(source_path, data_type=data_type)
+    safe_identifiers: Set[str] = set()
+    known_private_values: Set[str] = set()
+
+    documents = load_source_documents(
+        source_path,
+        data_type=data_type,
+        allow_cloud_vision=allow_cloud_vision,
+        safe_identifiers=safe_identifiers,
+        known_private_values=known_private_values,
+    )
 
     if not documents and not source_path.is_file():
         candidates = [
@@ -1298,7 +1427,13 @@ def run_ingestion(
         ]
         for c in candidates:
             if c.exists():
-                documents = load_source_documents(c, data_type=data_type)
+                documents = load_source_documents(
+                    c,
+                    data_type=data_type,
+                    allow_cloud_vision=allow_cloud_vision,
+                    safe_identifiers=safe_identifiers,
+                    known_private_values=known_private_values,
+                )
                 if documents:
                     source_path = c
                     break
@@ -1307,7 +1442,12 @@ def run_ingestion(
         logger.error(f"No valid knowledge data found in {source_path}")
         return 0
 
-    assert_no_private_in_embedded_fields(documents, opt_in_redact=redact)
+    assert_no_private_in_embedded_fields(
+        documents,
+        safe_identifiers=safe_identifiers,
+        known_private_values=known_private_values,
+        opt_in_redact=redact,
+    )
 
     if limit and limit > 0:
         documents = documents[:limit]
@@ -1366,13 +1506,13 @@ def main():
         "--source",
         type=str,
         default=os.getenv("RAG_DATA_SOURCE", "data/raw"),
-        help="Path to folder or file (supports .xlsx, .json, .csv, .md, .txt)",
+        help="Path to folder or file (supports .xlsx, .json, .csv, .md, .txt, .pdf, .png)",
     )
     parser.add_argument(
         "--type",
         type=str,
         default="auto",
-        choices=["auto", "student", "json", "csv", "doc"],
+        choices=["auto", "student", "json", "csv", "doc", "pdf", "image", "table"],
         help="Data type format (default: auto)",
     )
     parser.add_argument(
@@ -1398,10 +1538,20 @@ def main():
         help="Opt-in to redacting detected personal emails and phone numbers instead of failing (PRD S4)",
     )
     parser.add_argument(
+        "--cloud-vision",
+        action="store_true",
+        help="Opt-in to Google Gemini Cloud Vision for processing images (default: local OCR only)",
+    )
+    parser.add_argument(
         "--clear",
         "--delete-all",
         action="store_true",
         help="Delete all documents from the Qdrant Cloud collection and reset it empty",
+    )
+    parser.add_argument(
+        "--yes", "-y",
+        action="store_true",
+        help="Confirm destructive operations such as --clear without interactive prompt",
     )
 
     args = parser.parse_args()
@@ -1411,6 +1561,25 @@ def main():
         if not store.is_available():
             print(f"[ERROR] Qdrant storage is unreachable. Verify Qdrant configuration in .env.")
             sys.exit(1)
+
+        # Safety check: Refuse to clear active live collection alias
+        live_alias = os.getenv("QDRANT_LIVE_COLLECTION", "").strip() or os.getenv("LIVE_COLLECTION", "").strip()
+        if live_alias and store.collection_name.strip().lower() == live_alias.lower():
+            logger.error(f"Refusing to clear live production collection '{store.collection_name}'.")
+            print(f"[ERROR] Refusing to clear collection '{store.collection_name}' because it matches active LIVE collection alias.")
+            sys.exit(1)
+
+        # Require explicit confirmation
+        if not getattr(args, "yes", False):
+            if sys.stdin.isatty():
+                ans = input(f"Are you sure you want to completely clear collection '{store.collection_name}'? (yes/no): ").strip().lower()
+                if ans != "yes":
+                    print("[ABORT] Clear cancelled by user.")
+                    sys.exit(0)
+            else:
+                print(f"[ERROR] --clear requires confirmation. Pass --yes flag to confirm clearing collection '{store.collection_name}'.")
+                sys.exit(1)
+
         ok = store.clear_all()
         if ok:
             print(f"[SUCCESS] All documents successfully deleted from Qdrant Cloud (collection: '{store.collection_name}'). The database is completely cleared.")
@@ -1450,6 +1619,7 @@ def main():
         batch_size=args.batch_size,
         data_type=args.type,
         redact=args.redact,
+        allow_cloud_vision=args.cloud_vision,
     )
     if not args.dry_run and total == 0:
         sys.exit(1)

@@ -22,12 +22,29 @@ _EMAIL_PATTERN = re.compile(
 )
 
 # Unanchored phone number pattern matching:
-# 1. Indian 10-digit mobile numbers (+91 or 91 optional prefix, starting with 6-9)
+# 1. Indian 10-digit mobile numbers with optional prefix and internal spaces/separators (e.g. '98765 43210', '+91 98765-43210')
 # 2. International E.164 phone numbers with explicit '+' prefix and separators
 _PHONE_PATTERN = re.compile(
-    r"(?:\b|\+)(?:91[\s.-]?)?[6-9]\d{9}\b|"
+    r"(?:\b|\+)(?:91[\s.-]?)?[6-9](?:[\s.-]?\d){9}\b|"
     r"\+\d{1,3}[\s.-]?(?:\(\d{2,4}\)|\d{2,4})[\s.-]?\d{3,4}[\s.-]?\d{3,4}\b"
 )
+
+
+def is_phone_number(val: str) -> bool:
+    """Checks if a string represents or contains a phone number."""
+    if not val:
+        return False
+    digits = re.sub(r"[^\d]", "", str(val))
+    if len(digits) >= 10 and (str(val).strip().startswith("+") or digits.startswith(("6", "7", "8", "9"))):
+        return True
+    return bool(_PHONE_PATTERN.search(str(val)))
+
+
+def is_email_address(val: str) -> bool:
+    """Checks if a string represents or contains an email address."""
+    if not val or "@" not in str(val):
+        return False
+    return bool(_EMAIL_PATTERN.search(str(val)))
 
 
 def extract_searchable_corpus(doc: Dict[str, Any]) -> str:

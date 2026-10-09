@@ -187,3 +187,79 @@ def test_image_document_ingestion(tmp_path, monkeypatch):
     auto_docs = load_source_documents(img_file)
     assert len(auto_docs) == len(docs)
 
+
+def test_phone_with_space_in_waitlist_filtered(tmp_path):
+    from rag_knowledge.ingestion.ingest import load_generic_tabular_dataset
+
+    csv_file = tmp_path / "waitlist.csv"
+    csv_file.write_text(
+        "Name,Status,Phone,Father Name,Score\n"
+        "Aarav Sharma,Waiting List,98765 43210,Rajesh Sharma,92\n"
+        "Neha Verma,Waiting List,+91 91234-56789,Sanjay Verma,88\n",
+        encoding="utf-8",
+    )
+    docs = load_generic_tabular_dataset(csv_file)
+    wl_docs = [d for d in docs if "waiting_list" in d["id"]]
+    assert len(wl_docs) == 1
+    content = wl_docs[0]["content"]
+
+    # Ensure no phone numbers (spaced or formatted) or father's name leaked into waitlist embedded text
+    assert "98765 43210" not in content
+    assert "91234" not in content
+    assert "Rajesh Sharma" not in content
+    assert "Sanjay Verma" not in content
+    assert "Score: 92" in content
+
+
+def test_long_roll_number_exempt_from_phone_drop(tmp_path):
+    from rag_knowledge.ingestion.ingest import load_generic_tabular_dataset
+
+    csv_file = tmp_path / "students.csv"
+    # Roll number starting with 9 and >= 10 digits that might resemble a phone number
+    long_roll = "98202510001"
+    csv_file.write_text(
+        "Candidate Name,Roll Number,Branch\n"
+        f"Deepak Kumar,{long_roll},CSE\n",
+        encoding="utf-8",
+    )
+    docs = load_generic_tabular_dataset(csv_file)
+    rec_docs = [d for d in docs if d["category"] == "record"]
+    assert len(rec_docs) == 1
+    # Verify roll number was NOT dropped by the phone filter
+    assert long_roll in rec_docs[0]["content"]
+    assert rec_docs[0]["metadata"].get("Roll Number") == long_roll
+
+
+def test_image_no_cloud_vision_skips_without_junk_record(tmp_path, monkeypatch):
+    from rag_knowledge.ingestion.ingest import load_image_documents
+
+    img_file = tmp_path / "scan.png"
+    img_file.write_bytes(b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15c4\x00\x00\x00\nIDATx\x9cc\x00\x01\x00\x00\x05\x00\x01\r\n-\xb4\x00\x00\x00\x00IEND\xaeB`\x82")
+
+    # Simulate OCR failure when cloud vision is not allowed
+    monkeypatch.setattr(
+        "rag_knowledge.ingestion.ingest.extract_image_text",
+        lambda p, allow_cloud_vision=False: ("", "none", 0.0),
+    )
+
+    docs = load_image_documents(img_file, allow_cloud_vision=False)
+    # Must skip completely and NOT produce junk fallback "Image document scan.png"
+    assert docs == []
+
+
+def test_father_name_in_content_flagged_and_redacted():
+    doc = {
+        "id": "doc_eval",
+        "title": "Nominal Roll Summary",
+        "content": "Candidate: Rohan Gupta, Father Name: Ramesh Gupta, Branch: IT",
+    }
+    # 1. Flagged and blocked when unredacted
+    with pytest.raises(PrivacyGateError):
+        assert_no_privacy_leaks([dict(doc)], known_private_values={"Ramesh Gupta"})
+
+    # 2. Successfully redacted when opt_in_redact is True
+    cloned = dict(doc)
+    assert_no_privacy_leaks([cloned], known_private_values={"Ramesh Gupta"}, opt_in_redact=True)
+    assert "Ramesh Gupta" not in cloned["content"]
+    assert "[REDACTED]" in cloned["content"]
+
