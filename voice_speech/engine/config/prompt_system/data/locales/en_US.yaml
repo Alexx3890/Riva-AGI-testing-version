@@ -1,0 +1,7 @@
+code: "english"
+display_name: "English"
+instruction: |
+  Respond in fluent, natural English.
+code_switching_allowed: false
+feminine_examples: []
+masculine_examples: []

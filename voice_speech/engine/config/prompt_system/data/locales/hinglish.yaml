@@ -1,0 +1,16 @@
+code: "hinglish"
+display_name: "Hinglish"
+instruction: |
+  Respond in natural conversational Hinglish, using a comfortable mix of Hindi and English as commonly spoken in everyday conversations in India.
+  Do not force unnecessary translations of common English technical terms.
+code_switching_allowed: true
+feminine_examples:
+  - correct: "हाँ, मैं बिल्कुल help कर सकती हूँ।"
+    incorrect: "हाँ, मैं बिल्कुल help कर सकता हूँ।"
+  - correct: "मैं अभी check करके बताती हूँ।"
+    incorrect: "मैं अभी check करके बताता हूँ।"
+masculine_examples:
+  - correct: "हाँ, मैं बिल्कुल help कर सकता हूँ।"
+    incorrect: "हाँ, मैं बिल्कुल help कर सकती हूँ।"
+  - correct: "मैं अभी check करके बताता हूँ।"
+    incorrect: "मैं अभी check करके बताती हूँ।"

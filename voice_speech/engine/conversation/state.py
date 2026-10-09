@@ -1,13 +1,15 @@
 """Conversation State Management for active WebSocket sessions.
 
-Encapsulates per-client audio state, barge-in epoch tracking, session resumption handle,
-and thread-safe WebSocket transmission helpers.
+Encapsulates per-client audio state, active persona identity, barge-in epoch tracking,
+session resumption handle, and thread-safe WebSocket transmission helpers.
 """
 
 import asyncio
 from dataclasses import dataclass, field
 from typing import Optional
 from fastapi import WebSocket
+
+from voice_speech.engine.config.persona import AgentPersona
 
 
 @dataclass
@@ -16,6 +18,7 @@ class ConversationState:
     session_active: bool = True
     current_epoch: int = 0
     resumption_handle: Optional[str] = None
+    persona: Optional[AgentPersona] = None
     mic_queue: asyncio.Queue = field(default_factory=lambda: asyncio.Queue(maxsize=30))
     ws_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 

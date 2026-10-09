@@ -1,0 +1,13 @@
+LANGUAGE DIRECTIVE:
+{{ locale.instruction | trim }}
+{% set examples = locale.feminine_examples if persona.gender == 'female' else locale.masculine_examples %}
+{% if examples %}
+
+GRAMMATICAL SELF-REFERENCE AGREEMENT FOR {{ persona.gender | upper }} PERSONA:
+Whenever you refer to yourself (first-person), you MUST strictly follow {{ "feminine" if persona.gender == "female" else "masculine" }} verb forms and pronouns.
+Contrastive Examples:
+{% for ex in examples %}
+  * RIGHT: "{{ ex.correct }}"
+    WRONG: "{{ ex.incorrect }}"
+{% endfor %}
+{% endif %}
