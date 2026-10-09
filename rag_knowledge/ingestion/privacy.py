@@ -6,13 +6,26 @@ content, titles, summaries, keywords, or metadata.
 Fails closed on leaks unless opt-in redaction is explicitly configured.
 """
 
+import functools
 import re
-from typing import Any, Dict, Iterable, List, Optional, Set
+from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
 
 class PrivacyGateError(ValueError):
     """Raised when private sensitive data is detected in public embedded fields or metadata."""
     pass
+
+
+@functools.lru_cache(maxsize=32)
+def _get_compiled_private_pattern(private_tuple: Tuple[str, ...]) -> Optional[re.Pattern]:
+    """Compiles a combined boundary-safe regex pattern for all known private entity values."""
+    if not private_tuple:
+        return None
+    sorted_pvs = sorted(private_tuple, key=len, reverse=True)
+    valid_pvs = [re.escape(p) for p in sorted_pvs if p and len(p.strip()) >= 3]
+    if not valid_pvs:
+        return None
+    return re.compile(r"\b(?:" + "|".join(valid_pvs) + r")\b", re.IGNORECASE)
 
 
 # RFC-5322 compliant email pattern (unanchored)
@@ -70,15 +83,10 @@ def scan_for_privacy_leaks(
     text: str,
     safe_identifiers: Optional[Set[str]] = None,
     known_private_values: Optional[Set[str]] = None,
+    pv_pattern: Optional[re.Pattern] = None,
 ) -> Dict[str, List[str]]:
     """Scans text for unanchored email, phone leaks, and known private entity values."""
     safe = {str(s).strip().upper() for s in (safe_identifiers or set()) if s}
-    private_vals = {
-        str(p).strip().upper()
-        for p in (known_private_values or set())
-        if p and len(str(p).strip()) >= 3 and str(p).strip().upper() not in safe
-    }
-
     leaks: Dict[str, List[str]] = {"emails": [], "phones": [], "private_values": []}
 
     # 1. Scan emails
@@ -99,12 +107,20 @@ def scan_for_privacy_leaks(
             leaks["phones"].append(raw_match)
 
     # 3. Scan known private entity values (father names, personal emails, personal phones)
-    upper_text = text.upper()
-    for pv in private_vals:
-        # Check boundary-safe match for names / sensitive strings
-        pattern = r"\b" + re.escape(pv) + r"\b"
-        if re.search(pattern, upper_text):
-            leaks["private_values"].append(pv)
+    pattern = pv_pattern
+    if pattern is None and known_private_values:
+        private_vals = {
+            str(p).strip().upper()
+            for p in known_private_values
+            if p and len(str(p).strip()) >= 3 and str(p).strip().upper() not in safe
+        }
+        if private_vals:
+            pattern = _get_compiled_private_pattern(tuple(sorted(private_vals)))
+
+    if pattern:
+        matches = pattern.findall(text)
+        if matches:
+            leaks["private_values"].extend(list(set(matches)))
 
     return leaks
 
@@ -113,14 +129,10 @@ def redact_private_text(
     text: str,
     safe_identifiers: Optional[Set[str]] = None,
     known_private_values: Optional[Set[str]] = None,
+    pv_pattern: Optional[re.Pattern] = None,
 ) -> str:
     """Replaces detected emails, phones, and known private values with redaction markers."""
     safe = {str(s).strip().upper() for s in (safe_identifiers or set()) if s}
-    private_vals = {
-        str(p).strip()
-        for p in (known_private_values or set())
-        if p and len(str(p).strip()) >= 3 and str(p).strip().upper() not in safe
-    }
 
     # Redact emails
     redacted = _EMAIL_PATTERN.sub("[REDACTED_EMAIL]", text)
@@ -137,9 +149,18 @@ def redact_private_text(
 
     redacted = _PHONE_PATTERN.sub(_phone_sub, redacted)
 
-    # Redact known private values
-    for pv in private_vals:
-        pattern = re.compile(r"\b" + re.escape(pv) + r"\b", re.IGNORECASE)
+    # Redact known private values using cached compiled regex
+    pattern = pv_pattern
+    if pattern is None and known_private_values:
+        private_vals = {
+            str(p).strip().upper()
+            for p in known_private_values
+            if p and len(str(p).strip()) >= 3 and str(p).strip().upper() not in safe
+        }
+        if private_vals:
+            pattern = _get_compiled_private_pattern(tuple(sorted(private_vals)))
+
+    if pattern:
         redacted = pattern.sub("[REDACTED]", redacted)
 
     return redacted
@@ -157,8 +178,14 @@ def assert_no_privacy_leaks(
     and keywords in-place with redactions, then re-verifies.
     Raises PrivacyGateError with all detected violations if any leak is unredacted.
     """
-    safe = safe_identifiers or set()
-    private_vals = known_private_values or set()
+    safe = {str(s).strip().upper() for s in (safe_identifiers or set()) if s}
+    clean_private = {
+        str(p).strip().upper()
+        for p in (known_private_values or set())
+        if p and len(str(p).strip()) >= 3 and str(p).strip().upper() not in safe
+    }
+    pv_pattern = _get_compiled_private_pattern(tuple(sorted(clean_private))) if clean_private else None
+
     violations: List[str] = []
 
     for doc in documents:
@@ -166,21 +193,33 @@ def assert_no_privacy_leaks(
             # Thorough redaction across all text fields
             for field in ["title", "summary", "content"]:
                 if field in doc and isinstance(doc[field], str):
-                    doc[field] = redact_private_text(doc[field], safe, private_vals)
+                    doc[field] = redact_private_text(
+                        doc[field],
+                        safe_identifiers=safe,
+                        known_private_values=clean_private,
+                        pv_pattern=pv_pattern,
+                    )
 
             if "aliases" in doc and isinstance(doc["aliases"], list):
                 doc["aliases"] = [
-                    redact_private_text(a, safe, private_vals) for a in doc["aliases"] if isinstance(a, str)
+                    redact_private_text(a, safe, clean_private, pv_pattern=pv_pattern)
+                    for a in doc["aliases"] if isinstance(a, str)
                 ]
 
             if "keywords" in doc and isinstance(doc["keywords"], list):
                 doc["keywords"] = [
-                    redact_private_text(k, safe, private_vals) for k in doc["keywords"] if isinstance(k, str)
+                    redact_private_text(k, safe, clean_private, pv_pattern=pv_pattern)
+                    for k in doc["keywords"] if isinstance(k, str)
                 ]
 
         # Scan (or re-scan after redaction)
         corpus = extract_searchable_corpus(doc)
-        leaks = scan_for_privacy_leaks(corpus, safe_identifiers=safe, known_private_values=private_vals)
+        leaks = scan_for_privacy_leaks(
+            corpus,
+            safe_identifiers=safe,
+            known_private_values=clean_private,
+            pv_pattern=pv_pattern,
+        )
 
         if leaks["emails"] or leaks["phones"] or leaks["private_values"]:
             doc_id = doc.get("id", "unknown_id")

@@ -20,6 +20,8 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 import openpyxl
 
+from rag_knowledge.ingestion.privacy import is_email_address, is_phone_number
+
 logger = logging.getLogger("rag.ingest.joiner")
 
 
@@ -52,9 +54,22 @@ def normalize_person_name(name: str) -> str:
     return " ".join(capitalized)
 
 
+_WARNED_SECRET_UNSET = False
+
+
 def make_opaque_ref_id(primary_key: str, secret_key: Optional[str] = None) -> str:
     """Creates a deterministic, non-reversible synthetic reference ID using HMAC-SHA256."""
-    secret = secret_key or os.getenv("RAG_ENTITY_SECRET", "riva_opaque_entity_salt_2026")
+    global _WARNED_SECRET_UNSET
+    secret = secret_key or os.getenv("RAG_ENTITY_SECRET", "").strip()
+    if not secret:
+        if not _WARNED_SECRET_UNSET:
+            logger.warning(
+                "CRITICAL SECURITY WARNING: 'RAG_ENTITY_SECRET' environment variable is NOT set! "
+                "Using fallback ephemeral secret. Hashes may be vulnerable or inconsistent across deployments. "
+                "Set RAG_ENTITY_SECRET in production."
+            )
+            _WARNED_SECRET_UNSET = True
+        secret = "riva_ephemeral_entity_salt_2026_change_in_production"
     digest = hmac.new(
         secret.encode("utf-8"),
         str(primary_key).strip().encode("utf-8"),
@@ -141,11 +156,10 @@ class StudentEntityJoiner:
             mentor = n_info.get("mentor", "")
             status = matched_master.get("admission_status", "ACTIVE") if matched_master else "ACTIVE"
 
-            # Register sensitive values for Privacy Gate inspection in memory
+            # Register sensitive contact values for Privacy Gate inspection in memory
             for pv in [
                 u_info.get("father_name"),
                 n_info.get("father_name"),
-                u_info.get("gender"),
                 nom_email,
                 n_info.get("phone"),
             ]:
@@ -200,6 +214,38 @@ class StudentEntityJoiner:
                     self.known_private_values.add(str(pv).strip())
 
         self.canonical_students = list(merged_entities.values())
+
+        # Legitimate student and mentor names are public identities and must not be flagged as private values
+        student_names = {s["name"].upper().strip() for s in self.canonical_students if s.get("name")}
+        mentor_names = {s["mentor"].upper().strip() for s in self.canonical_students if s.get("mentor")}
+        public_identities = student_names | mentor_names
+        name_tokens = {token for pub in public_identities for token in pub.split() if len(token) >= 3}
+        self.safe_identifiers.update(student_names)
+        self.safe_identifiers.update(name_tokens)
+
+        # Retain private emails and phones; remove any private names that collide with student/mentor identities
+        cleaned_private: Set[str] = set()
+        for pv in self.known_private_values:
+            pv_clean = str(pv).strip()
+            if not pv_clean:
+                continue
+            if is_email_address(pv_clean) or is_phone_number(pv_clean):
+                cleaned_private.add(pv_clean)
+                continue
+            pv_up = pv_clean.upper()
+            # Full private names require at least two words (e.g. 'Bhanu Pratap Rai') to prevent single given names
+            # (e.g. 'Ganesh') from colliding with student first names in other datasets
+            if len(pv_clean.split()) < 2:
+                continue
+            is_public_name = (
+                any(pv_up in pub or pub in pv_up for pub in public_identities if len(pub) >= 3)
+                or pv_up in name_tokens
+            )
+            if not is_public_name:
+                cleaned_private.add(pv_clean)
+
+        self.known_private_values = cleaned_private
+
         logger.info(
             f"StudentEntityJoiner compiled {len(self.canonical_students)} students. "
             f"Both Roll+UID matched: {matched_both_count}, Master-only: {unmatched_master_count}. "
@@ -396,12 +442,13 @@ class StudentEntityJoiner:
                     return ""
 
                 uid = clean_identifier(_get("uid"))
-                if not uid:
+                name = normalize_person_name(_get("name"))
+                if not uid or uid.lower() in {"uid", "studentuid", "none", "roll", "rollno", "rollnumber"} or name.lower() in {"name", "student name", "studentname", "candidate name"}:
                     continue
 
                 records[uid] = {
                     "student_uid": uid,
-                    "name": normalize_person_name(_get("name")),
+                    "name": name,
                     "sem": _get("sem"),
                     "section": _get("sec"),
                     "phone": _get("phone"),
@@ -447,6 +494,8 @@ class StudentEntityJoiner:
                 roll = clean_identifier(_get("roll"))
                 name = normalize_person_name(_get("name"))
                 if not roll and not name:
+                    continue
+                if roll.lower() in {"roll", "rollno", "rollnumber", "none"} or name.lower() in {"name", "student name", "studentname", "display name", "candidate name"}:
                     continue
 
                 status = _get("status") or "ACTIVE"

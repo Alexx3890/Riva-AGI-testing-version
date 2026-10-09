@@ -21,6 +21,24 @@ from .joiner import StudentEntityJoiner, make_opaque_ref_id
 
 logger = logging.getLogger("rag.ingest")
 
+_ID_COLUMN_PATTERN = re.compile(
+    r"\b(?:id|uid|roll|urn|reg|registration|serial|sno|s_no|code|candidate_id|applicant_id|student_id|enrollment)\b",
+    re.IGNORECASE,
+)
+
+_SENSITIVE_HEADER_KEYWORDS = (
+    "email", "phone", "mobile", "contact",
+    "father", "mother", "parent", "guardian",
+    "gender", "address", "dob", "birth",
+    "bank", "account", "ifsc", "caste", "aadhar", "pan", "salary", "income",
+)
+
+
+def is_sensitive_header(header: str) -> bool:
+    """Checks if a column header refers to private contact, parental, or financial data."""
+    h_low = str(header).lower()
+    return any(k in h_low for k in _SENSITIVE_HEADER_KEYWORDS)
+
 
 def normalize_whitespace(text: Optional[str]) -> str:
     """Collapses multiple spaces and strips whitespace."""
@@ -572,12 +590,6 @@ def load_pdf_documents(filepath: Path) -> List[Dict[str, Any]]:
     if not filepath.is_file():
         return []
 
-    # If a companion tabular file exists (e.g. CSV/XLSX sibling for scanned tables), prefer parsing it
-    for companion_ext in (".csv", ".tsv", ".xlsx", ".xls"):
-        sibling = filepath.with_suffix(companion_ext)
-        if sibling.exists():
-            return load_generic_tabular_dataset(sibling)
-
     try:
         from pypdf import PdfReader
     except ImportError:
@@ -696,14 +708,29 @@ def get_vision_fallback_models() -> list[str]:
     return get_fallback_gemini_models()
 
 
-def extract_image_text(filepath: Path, allow_cloud_vision: bool = False) -> Tuple[str, str, float]:
+def is_cloud_vision_permitted(filepath: Path, allow_cloud_vision: bool = False) -> bool:
+    """Checks whether cloud vision is permitted for this specific file or run."""
+    if allow_cloud_vision:
+        return True
+    raw_env = os.getenv("ALLOW_CLOUD_VISION", "0").strip().lower()
+    if raw_env in ("1", "true", "yes", "all"):
+        allowlist = os.getenv("ALLOW_CLOUD_VISION_ALLOWLIST", "").strip()
+        if not allowlist:
+            return True
+        allowed_tokens = [tok.strip().lower() for tok in allowlist.split(",") if tok.strip()]
+        target_str = f"{filepath.parent.name}/{filepath.name}".lower()
+        return any(tok in target_str for tok in allowed_tokens)
+    return False
+
+
+def extract_image_text(filepath: Path, allow_cloud_vision: bool = False) -> Tuple[str, str, Any]:
     """Extracts textual and structured content from an image via local OCR (default) or opt-in Gemini Vision.
 
     Returns:
         (extracted_text, extraction_method, confidence)
     """
     load_env()
-    cloud_opted_in = allow_cloud_vision or os.getenv("ALLOW_CLOUD_VISION", "0").lower() in ("1", "true", "yes")
+    cloud_opted_in = is_cloud_vision_permitted(filepath, allow_cloud_vision=allow_cloud_vision)
 
     # 1. Default: Local OCR (pytesseract) to protect student privacy
     try:
@@ -712,7 +739,7 @@ def extract_image_text(filepath: Path, allow_cloud_vision: bool = False) -> Tupl
         with Image.open(filepath) as img:
             ocr_text = pytesseract.image_to_string(img).strip()
             if ocr_text:
-                confidence = 0.75
+                confidence = None
                 try:
                     data = pytesseract.image_to_data(img, output_type=pytesseract.Output.DICT)
                     confs = [float(c) for c in data.get("conf", []) if str(c).strip() not in ("", "-1")]
@@ -720,12 +747,13 @@ def extract_image_text(filepath: Path, allow_cloud_vision: bool = False) -> Tupl
                         confidence = round(sum(confs) / len(confs) / 100.0, 2)
                 except Exception:
                     pass
-                logger.info(f"Extracted OCR text from {filepath.name} via local pytesseract (confidence={confidence}).")
+                conf_display = f"{confidence:.2f}" if confidence is not None else "unknown"
+                logger.info(f"Extracted OCR text from {filepath.name} via local pytesseract (confidence={conf_display}).")
                 return ocr_text, "local_ocr", confidence
     except Exception as e:
         logger.warning(f"Local OCR failed or unavailable for {filepath.name}: {e}")
 
-    # 2. Opt-in: Gemini Vision API (only if explicitly allowed via flag or ALLOW_CLOUD_VISION=1)
+    # 2. Opt-in: Gemini Vision API (only if explicitly allowed via flag or ALLOW_CLOUD_VISION=1 / allowlist)
     if cloud_opted_in:
         api_key = get_vision_api_key()
         if api_key:
@@ -790,7 +818,8 @@ def extract_image_text(filepath: Path, allow_cloud_vision: bool = False) -> Tupl
                             cand = res.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "")
                             if cand.strip():
                                 logger.info(f"Successfully extracted text from image {filepath.name} using Gemini Vision ({model_name}).")
-                                return cand.strip(), "gemini_vision", 0.95
+                                # Gemini Vision does not return an OCR word confidence score; record as unknown
+                                return cand.strip(), "gemini_vision", None
                     except urllib.error.HTTPError as he:
                         logger.warning(f"Gemini Vision call for {model_name} HTTP {he.code}: {he.reason}")
                         continue
@@ -800,11 +829,11 @@ def extract_image_text(filepath: Path, allow_cloud_vision: bool = False) -> Tupl
             except Exception as e:
                 logger.warning(f"Error invoking Gemini Vision for {filepath.name}: {e}")
     else:
-        logger.info(f"Cloud vision is disabled for {filepath.name}. To enable, set ALLOW_CLOUD_VISION=1 or pass --cloud-vision.")
+        logger.info(f"Cloud vision is disabled for {filepath.name}. To enable, pass --cloud-vision or configure ALLOW_CLOUD_VISION.")
 
     # 3. If extraction failed or yielded nothing, report and skip rather than creating a junk record
     logger.warning(f"No textual content could be extracted from image {filepath.name}. Skipping indexing.")
-    return "", "none", 0.0
+    return "", "none", None
 
 
 def load_image_documents(filepath: Path, allow_cloud_vision: bool = False) -> List[Dict[str, Any]]:
@@ -819,19 +848,20 @@ def load_image_documents(filepath: Path, allow_cloud_vision: bool = False) -> Li
     if isinstance(res, tuple):
         raw_text, method, confidence = res
     else:
-        raw_text, method, confidence = str(res or ""), "custom", 0.85
+        raw_text, method, confidence = str(res or ""), "custom", None
 
     if not raw_text or not raw_text.strip():
         # Do not index empty images or fallback junk records
         return []
 
+    conf_record = confidence if confidence is not None else "unknown"
     img_meta: Dict[str, Any] = {
         "source": filepath.name,
         "file_type": "image",
         "extraction_method": method,
-        "confidence": confidence,
+        "confidence": conf_record,
     }
-    if confidence < 0.6:
+    if isinstance(confidence, (int, float)) and confidence < 0.6:
         img_meta["flagged_for_review"] = True
 
     try:
@@ -853,7 +883,7 @@ def load_image_documents(filepath: Path, allow_cloud_vision: bool = False) -> Li
         raw_sections = [s.strip() for s in re.split(r"\n(?=#{1,3}\s+)", raw_text) if s.strip()]
 
     extra_keywords = ["image", "transcription", clean_stem]
-    if confidence < 0.6:
+    if isinstance(confidence, (int, float)) and confidence < 0.6:
         extra_keywords.append("needs_review")
 
     if len(raw_sections) > 1:
@@ -910,7 +940,12 @@ def load_image_documents(filepath: Path, allow_cloud_vision: bool = False) -> Li
     return documents
 
 
-def load_generic_tabular_dataset(filepath: Path, max_row_docs: int = 1500) -> List[Dict[str, Any]]:
+def load_generic_tabular_dataset(
+    filepath: Path,
+    max_row_docs: int = 1500,
+    safe_identifiers: Optional[Set[str]] = None,
+    known_private_values: Optional[Set[str]] = None,
+) -> List[Dict[str, Any]]:
     """Universal tabular ingestion engine for CSV, TSV, and Excel spreadsheets.
 
     Dynamically ingests any arbitrary table without hardcoded column names or file rules:
@@ -929,6 +964,12 @@ def load_generic_tabular_dataset(filepath: Path, max_row_docs: int = 1500) -> Li
 
     ext = filepath.suffix.lower()
     table_name = filepath.stem.replace("_", " ").replace("-", " ").title()
+    safe_clean = {str(s).strip().upper() for s in (safe_identifiers or set()) if s}
+    private_digits = {
+        re.sub(r"[^\d]", "", str(p))
+        for p in (known_private_values or set())
+        if p and len(re.sub(r"[^\d]", "", str(p))) >= 10
+    }
 
     sheet_datasets: List[Tuple[str, List[str], List[List[str]]]] = []
 
@@ -1007,11 +1048,11 @@ def load_generic_tabular_dataset(filepath: Path, max_row_docs: int = 1500) -> Li
             clean = re.sub(r"\+?\d{10,12}", "", clean).strip()
             return clean if clean else "Candidate"
 
-        # 2. Discover categorical columns dynamically (exclude email/phone columns)
+        # 2. Discover categorical columns dynamically (exclude private/contact columns)
         categorical_cols: Dict[int, Tuple[str, Counter]] = {}
         for c_idx, h in enumerate(headers):
             h_low = h.lower()
-            if "email" in h_low or "phone" in h_low or "mobile" in h_low:
+            if any(k in h_low for k in ["email", "phone", "mobile", "contact", "father", "parent", "guardian", "gender", "address", "dob", "birth"]):
                 continue
             vals = [r[c_idx] for r in data_rows if len(r) > c_idx and r[c_idx] and r[c_idx].lower() not in ("none", "not found", "-", "nan")]
             if not vals:
@@ -1021,7 +1062,11 @@ def load_generic_tabular_dataset(filepath: Path, max_row_docs: int = 1500) -> Li
                 categorical_cols[c_idx] = (h, Counter(vals))
 
         # 3. Build Table Master Overview Document
-        col_list_str = ", ".join(headers)
+        safe_headers = [
+            h for h in headers
+            if not any(k in h.lower() for k in ["email", "phone", "mobile", "contact", "father", "parent", "guardian", "gender", "address", "dob", "birth"])
+        ]
+        col_list_str = ", ".join(safe_headers or headers)
         overview_lines = [
             f"Dataset: {sub_title}",
             f"Source File: {filepath.name}",
@@ -1053,8 +1098,7 @@ def load_generic_tabular_dataset(filepath: Path, max_row_docs: int = 1500) -> Li
             attrs = []
             for ci in range(len(r_row)):
                 if ci != name_col_idx and ci < len(headers) and r_row[ci]:
-                    h_ci_low = headers[ci].lower()
-                    if any(k in h_ci_low for k in ["email", "phone", "mobile", "contact", "father", "parent", "guardian", "gender", "address", "dob", "birth"]):
+                    if is_sensitive_header(headers[ci]):
                         continue
                     v = str(r_row[ci]).strip()
                     if is_email_address(v) or is_phone_number(v):
@@ -1263,28 +1307,47 @@ def load_generic_tabular_dataset(filepath: Path, max_row_docs: int = 1500) -> Li
             row_meta: Dict[str, Any] = {"source": filepath.name, "row_index": idx + 1}
             id_val = None
 
+            # Collect contact values from sensitive columns in this row to detect accidental duplicate entries in ID columns
+            row_contact_digits = set()
+            for ci, h in enumerate(headers):
+                if ci < len(r) and r[ci]:
+                    val_str = str(r[ci]).strip()
+                    if is_sensitive_header(h):
+                        digs = re.sub(r"[^\d]", "", val_str)
+                        if len(digs) >= 10:
+                            row_contact_digits.add(digs)
+
             for ci, h in enumerate(headers):
                 if ci < len(r) and r[ci]:
                     val = str(r[ci]).strip()
-                    h_lower = h.lower()
 
-                    # Check if column is an identifier column (roll, uid, id, reg, etc.)
-                    is_id_col = any(k in h_lower for k in ["roll", "uid", "urn", "reg", "serial", "code", "index", "id", "candidate_id", "applicant_id", "sno"])
-                    if is_id_col and not id_val:
-                        id_val = clean_identifier(val)
+                    # Check if column is an identifier column using word-boundary matching
+                    # Prevents substrings in words like 'residence', 'valid', 'paid', 'guide' from matching 'id'
+                    is_contact_header = is_sensitive_header(h)
+                    is_id_col = bool(_ID_COLUMN_PATTERN.search(h)) and not is_contact_header
 
                     # Strictly filter private contact details from both metadata payload and embedded text
-                    if any(k in h_lower for k in ["email", "phone", "mobile", "contact", "father", "parent", "guardian", "gender", "address", "dob", "birth"]):
+                    if is_contact_header:
                         continue
                     if is_email_address(val):
                         continue
 
-                    # If not an identifier column, check for phone numbers
-                    if not is_id_col:
-                        if is_phone_number(val):
+                    digits = re.sub(r"[^\d]", "", val)
+                    is_known_phone = bool(len(digits) >= 10 and (digits in row_contact_digits or digits in private_digits))
+                    val_is_safe = bool(safe_clean and (val.upper() in safe_clean or clean_identifier(val).upper() in safe_clean))
+
+                    # If in an ID column, filter out if it actually matches a known phone number
+                    # from the row/master list (and is not an approved safe identifier). Otherwise allow valid IDs.
+                    if is_id_col:
+                        if is_known_phone and not val_is_safe:
                             continue
-                        digits = re.sub(r"[^\d]", "", val)
-                        if len(digits) >= 10 and (val.startswith("+") or digits.startswith(("6", "7", "8", "9"))):
+                        if not id_val:
+                            id_val = clean_identifier(val)
+                    else:
+                        # Non-ID columns are strictly checked for phone numbers
+                        if is_phone_number(val) and not val_is_safe:
+                            continue
+                        if len(digits) >= 10 and (val.startswith("+") or digits.startswith(("6", "7", "8", "9"))) and not val_is_safe:
                             continue
 
                     row_meta[h] = val
@@ -1335,7 +1398,11 @@ def load_source_documents(
         if dtype == "json" or ext == ".json":
             return load_json_documents(source_path)
         if ext in (".csv", ".tsv", ".xlsx", ".xls"):
-            return load_generic_tabular_dataset(source_path)
+            return load_generic_tabular_dataset(
+                source_path,
+                safe_identifiers=safe_identifiers,
+                known_private_values=known_private_values,
+            )
         if dtype in ("doc", "text", "markdown") or ext in (".md", ".txt"):
             return load_text_or_markdown(source_path)
         if dtype == "pdf" or ext == ".pdf":
@@ -1347,6 +1414,8 @@ def load_source_documents(
     if source_path.is_dir():
         docs: List[Dict[str, Any]] = []
         handled_files: Set[Path] = set()
+        active_safe_ids = set(safe_identifiers) if safe_identifiers else set()
+        active_private_vals = set(known_private_values) if known_private_values else set()
 
         # 1. Process unified student datasets using canonical StudentEntityJoiner
         has_uid = (source_path / "UID.xlsx").exists()
@@ -1357,6 +1426,8 @@ def load_source_documents(
             student_docs = joiner.to_knowledge_documents()
             if student_docs:
                 docs.extend(student_docs)
+                active_safe_ids.update(joiner.safe_identifiers)
+                active_private_vals.update(joiner.known_private_values)
                 if safe_identifiers is not None:
                     safe_identifiers.update(joiner.safe_identifiers)
                 if known_private_values is not None:
@@ -1381,7 +1452,11 @@ def load_source_documents(
             if ext == ".json":
                 docs.extend(load_json_documents(file))
             elif ext in (".csv", ".tsv", ".xlsx", ".xls"):
-                docs.extend(load_generic_tabular_dataset(file))
+                docs.extend(load_generic_tabular_dataset(
+                    file,
+                    safe_identifiers=active_safe_ids,
+                    known_private_values=active_private_vals,
+                ))
             elif ext in (".md", ".txt"):
                 docs.extend(load_text_or_markdown(file))
             elif ext == ".pdf":
@@ -1562,22 +1637,26 @@ def main():
             print(f"[ERROR] Qdrant storage is unreachable. Verify Qdrant configuration in .env.")
             sys.exit(1)
 
-        # Safety check: Refuse to clear active live collection alias
+        # Safety check: Refuse to clear active live collection alias or if live alias is unconfigured
         live_alias = os.getenv("QDRANT_LIVE_COLLECTION", "").strip() or os.getenv("LIVE_COLLECTION", "").strip()
-        if live_alias and store.collection_name.strip().lower() == live_alias.lower():
+        if not live_alias:
+            print(f"[ERROR] Safety policy violation: Neither 'QDRANT_LIVE_COLLECTION' nor 'LIVE_COLLECTION' is configured.")
+            print(f"Refusing to execute destructive --clear on '{store.collection_name}' without a protected live collection policy.")
+            sys.exit(1)
+        if store.collection_name.strip().lower() == live_alias.lower():
             logger.error(f"Refusing to clear live production collection '{store.collection_name}'.")
-            print(f"[ERROR] Refusing to clear collection '{store.collection_name}' because it matches active LIVE collection alias.")
+            print(f"[ERROR] Refusing to clear collection '{store.collection_name}' because it matches active LIVE collection alias ({live_alias}).")
             sys.exit(1)
 
         # Require explicit confirmation
         if not getattr(args, "yes", False):
             if sys.stdin.isatty():
-                ans = input(f"Are you sure you want to completely clear collection '{store.collection_name}'? (yes/no): ").strip().lower()
+                ans = input(f"Are you sure you want to completely clear target collection '{store.collection_name}'? (yes/no): ").strip().lower()
                 if ans != "yes":
                     print("[ABORT] Clear cancelled by user.")
                     sys.exit(0)
             else:
-                print(f"[ERROR] --clear requires confirmation. Pass --yes flag to confirm clearing collection '{store.collection_name}'.")
+                print(f"[ERROR] --clear requires confirmation. Pass --yes flag to confirm clearing target collection '{store.collection_name}'.")
                 sys.exit(1)
 
         ok = store.clear_all()

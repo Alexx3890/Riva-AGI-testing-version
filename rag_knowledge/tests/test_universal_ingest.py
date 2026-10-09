@@ -263,3 +263,50 @@ def test_father_name_in_content_flagged_and_redacted():
     assert "Ramesh Gupta" not in cloned["content"]
     assert "[REDACTED]" in cloned["content"]
 
+
+def test_residence_phone_not_exempt_from_filter(tmp_path):
+    from rag_knowledge.ingestion.ingest import load_generic_tabular_dataset
+
+    csv_file = tmp_path / "candidates_residence.csv"
+    # Columns 'Residence Phone' and 'Paid Contact' contain 'id' as a substring.
+    # Neither must be treated as an ID column, and phone numbers must be strictly filtered.
+    csv_file.write_text(
+        "Candidate Name,Residence Phone,Paid Contact,Branch\n"
+        "Shreya Singh,9876543210,9123456789,ECE\n",
+        encoding="utf-8",
+    )
+    docs = load_generic_tabular_dataset(csv_file)
+    rec_docs = [d for d in docs if d["category"] == "record"]
+    assert len(rec_docs) == 1
+    doc_content = rec_docs[0]["content"]
+    doc_meta = rec_docs[0]["metadata"]
+
+    # Verify neither 'Residence Phone' nor 'Paid Contact' phone numbers leaked
+    assert "9876543210" not in doc_content
+    assert "9123456789" not in doc_content
+    assert "Residence Phone" not in doc_meta
+    assert "Paid Contact" not in doc_meta
+
+
+def test_phone_number_in_id_column_filtered_when_matching_contact(tmp_path):
+    from rag_knowledge.ingestion.ingest import load_generic_tabular_dataset
+
+    csv_file = tmp_path / "club_form.csv"
+    # An applicant mistakenly typed their phone number into the 'Student ID' column
+    # as well as the 'Phone Number' column.
+    csv_file.write_text(
+        "Candidate Name,Student ID,Phone Number,Branch\n"
+        "Test Applicant,9876543210,9876543210,ELCE\n",
+        encoding="utf-8",
+    )
+    docs = load_generic_tabular_dataset(csv_file)
+    rec_docs = [d for d in docs if d["category"] == "record"]
+    assert len(rec_docs) == 1
+    doc_content = rec_docs[0]["content"]
+    doc_meta = rec_docs[0]["metadata"]
+
+    # Verify the phone number was dropped from the ID column and not stored in metadata
+    assert "9876543210" not in doc_content
+    assert "Student ID" not in doc_meta
+    assert "Phone Number" not in doc_meta
+
