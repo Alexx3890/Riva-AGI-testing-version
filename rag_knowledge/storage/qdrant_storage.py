@@ -79,7 +79,7 @@ class QdrantKnowledgeStore:
             if vector_size is not None
             else (int(os.getenv("EMBEDDING_DIM").strip()) if os.getenv("EMBEDDING_DIM", "").strip().isdigit() else None)
         )
-        env_timeout = float(os.getenv("QDRANT_TIMEOUT", "15.0"))
+        env_timeout = float(os.getenv("QDRANT_TIMEOUT", "60.0"))
         self.timeout = timeout if timeout is not None else env_timeout
 
         self._client: Optional[Any] = None
@@ -242,13 +242,43 @@ class QdrantKnowledgeStore:
                 )
             )
 
-        self._client.upsert(
-            collection_name=self.collection_name,
-            points=points,
-            wait=True,
-        )
+        self._execute_upsert_points(points)
         logger.info(f"Upserted {len(points)} points into Qdrant collection '{self.collection_name}'")
         return len(points)
+
+    def _execute_upsert_points(self, points: List[Any], max_retries: int = 3) -> None:
+        """Executes points upsert with exponential backoff and automatic sub-chunking on timeout."""
+        if not points or not self._client:
+            return
+        for attempt in range(max_retries):
+            try:
+                write_timeout = int(max(self.timeout, 60.0))
+                self._client.upsert(
+                    collection_name=self.collection_name,
+                    points=points,
+                    wait=True,
+                    timeout=write_timeout,
+                )
+                return
+            except Exception as e:
+                err_str = str(e).lower()
+                is_timeout = any(k in err_str for k in ("timeout", "handling", "connection", "write", "socket"))
+                if is_timeout and len(points) > 15:
+                    mid = len(points) // 2
+                    logger.warning(
+                        f"Upsert timed out for batch of {len(points)} points. "
+                        f"Splitting into smaller chunks ({mid} and {len(points) - mid}) and retrying..."
+                    )
+                    self._execute_upsert_points(points[:mid], max_retries=max_retries)
+                    self._execute_upsert_points(points[mid:], max_retries=max_retries)
+                    return
+
+                if attempt == max_retries - 1:
+                    logger.error(f"Failed to upsert points after {max_retries} attempts: {e}")
+                    raise
+                backoff = (2 ** attempt) * 2.0
+                logger.warning(f"Upsert attempt {attempt + 1} encountered transient error: {e}. Retrying in {backoff:.1f}s...")
+                time.sleep(backoff)
 
     def search_text(
         self,

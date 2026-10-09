@@ -1472,7 +1472,7 @@ def run_ingestion(
     source_dir: Path,
     dry_run: bool = False,
     limit: Optional[int] = None,
-    batch_size: int = 100,
+    batch_size: int = 50,
     data_type: str = "auto",
     redact: bool = False,
     allow_cloud_vision: bool = False,
@@ -1604,8 +1604,8 @@ def main():
     parser.add_argument(
         "--batch-size",
         type=int,
-        default=150,
-        help="Bulk upsert batch size",
+        default=int(os.getenv("QDRANT_BATCH_SIZE", "50")),
+        help="Bulk upsert batch size (default: 50, configurable via QDRANT_BATCH_SIZE)",
     )
     parser.add_argument(
         "--redact",
