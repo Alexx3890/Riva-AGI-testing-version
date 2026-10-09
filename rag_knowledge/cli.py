@@ -1,13 +1,4 @@
-"""Command-Line Interface for rag_knowledge.
-
-Allows standalone testing and querying of the RAG knowledge base
-independently of any other services.
-
-Usage:
-    python -m rag_knowledge "Do you know about Alex Doe?"
-    python -m rag_knowledge --list
-    python rag_knowledge/cli.py "Who is Alex Doe?"
-"""
+"""CLI for rag_knowledge."""
 
 import argparse
 import asyncio
@@ -19,7 +10,7 @@ from .service import get_rag_service, query_rag
 
 
 def list_knowledge_entries():
-    """Prints all registered knowledge entries using the shared service retriever."""
+    """List registered knowledge entries."""
     service = get_rag_service()
     docs = service.retriever.documents
     total_str = f"{len(docs)}" if len(docs) < 100 else f"{len(docs)}+ (limit 100 reached)"
@@ -32,11 +23,12 @@ def list_knowledge_entries():
 
 
 async def run_query(query: str, verbose: bool = True):
-    """Executes a query against the RAG service and prints results."""
+    """Execute a query against the RAG service and display results."""
     service = get_rag_service()
     pre_matches = None
+    cli_top_k = int(os.getenv("RAG_TOP_K", "5"))
     if verbose:
-        pre_matches = await asyncio.to_thread(service.retriever.retrieve, query, top_k=2)
+        pre_matches = await asyncio.to_thread(service.retriever.retrieve, query, top_k=cli_top_k)
         print(f"\n[Retrieval Matches for '{query}']:")
         if pre_matches:
             for idx, m in enumerate(pre_matches, 1):
@@ -58,7 +50,7 @@ def main():
         "query",
         nargs="?",
         default=None,
-        help="Search query or question (e.g. 'Who is Alex Doe?')",
+        help="Search query or question (e.g. 'What events are scheduled?')",
     )
     parser.add_argument(
         "--list",

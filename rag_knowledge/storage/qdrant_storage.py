@@ -1,8 +1,4 @@
-"""Qdrant Vector Database Storage Backend for rag_knowledge.
-
-Provides semantic vector search, payload filtering, and fast document retrieval
-via Qdrant Cloud and local FastEmbed (BAAI/bge-small-en-v1.5) ONNX embeddings.
-"""
+"""Qdrant vector database storage backend for rag_knowledge."""
 
 import logging
 import os
@@ -15,7 +11,7 @@ from typing import Any, Dict, List, Optional
 logger = logging.getLogger("rag.storage.qdrant")
 
 _NAMESPACE_RIVA = uuid.UUID("6ba7b810-9dad-11d1-80b4-00c04fd430c8")
-_ID_TOKEN_PATTERN = re.compile(r"^(?=.*\d)[A-Za-z0-9]{6,}$")  # Alphanumeric with at least 1 digit, min 6 chars
+_ID_TOKEN_PATTERN = re.compile(r"^(?=.*\d)[A-Za-z0-9]{6,}$")
 
 try:
     from qdrant_client import QdrantClient, models
@@ -40,7 +36,8 @@ class QdrantKnowledgeStore:
         api_key: Optional[str] = None,
         collection_name: Optional[str] = None,
         model_name: Optional[str] = None,
-        timeout: float = 4.0,
+        vector_size: Optional[int] = None,
+        timeout: Optional[float] = None,
     ) -> None:
         try:
             from rag_knowledge import load_env
@@ -63,6 +60,7 @@ class QdrantKnowledgeStore:
             else (
                 os.getenv("QDRANT_WRITE_API_KEY", "").strip()
                 or os.getenv("QDRANT_API_KEY", "").strip()
+                or os.getenv("QDRANT_API", "").strip()
                 or os.getenv("qdrant_api", "").strip()
             )
         )
@@ -79,8 +77,13 @@ class QdrantKnowledgeStore:
             if model_name is not None
             else (os.getenv("EMBEDDING_MODEL", "").strip() or "BAAI/bge-small-en-v1.5")
         )
-        self.vector_size = 384  # Dimension for BAAI/bge-small-en-v1.5
-        self.timeout = timeout
+        self.vector_size = (
+            vector_size
+            if vector_size is not None
+            else int(os.getenv("EMBEDDING_DIM", "384").strip() or 384)
+        )
+        env_timeout = float(os.getenv("QDRANT_TIMEOUT", "15.0"))
+        self.timeout = timeout if timeout is not None else env_timeout
 
         self._client: Optional[Any] = None
         self._embedding_model: Optional[Any] = None
@@ -114,8 +117,12 @@ class QdrantKnowledgeStore:
                 return False
 
             try:
-                self._client = QdrantClient(url=self.url, api_key=self.api_key, timeout=self.timeout)
-                # Verify connection
+                self._client = QdrantClient(
+                    url=self.url,
+                    api_key=self.api_key,
+                    timeout=self.timeout,
+                    check_compatibility=False,
+                )
                 self._client.get_collections()
                 self._ensure_collection()
                 self._is_connected = True
@@ -147,7 +154,6 @@ class QdrantKnowledgeStore:
                 ),
             )
         else:
-            # Dimension check on existing collection
             try:
                 col_info = self._client.get_collection(self.collection_name)
                 vectors_cfg = getattr(col_info.config.params, "vectors", None)
@@ -164,7 +170,6 @@ class QdrantKnowledgeStore:
                     raise
                 logger.debug("Dimension check bypassed or collection inspection note: %s", ex)
 
-        # Idempotently ensure payload indexes exist (runs on new and existing collections)
         for field, field_type in [
             ("is_active", models.PayloadSchemaType.BOOL),
             ("aliases", models.PayloadSchemaType.KEYWORD),
@@ -251,13 +256,16 @@ class QdrantKnowledgeStore:
     def search_text(
         self,
         query: str,
-        top_k: int = 2,
-        min_score: float = 0.45,
+        top_k: Optional[int] = None,
+        min_score: Optional[float] = None,
     ) -> List[Dict[str, Any]]:
         """Performs hybrid semantic vector search + exact identifier matching with is_active filtering."""
         clean_query = query.strip()
         if not clean_query or not self.is_available() or not self._client:
             return []
+
+        effective_top_k = top_k if top_k is not None else int(os.getenv("RAG_TOP_K", "5"))
+        effective_min_score = min_score if min_score is not None else float(os.getenv("RAG_MIN_SCORE", "0.45"))
 
         active_filter = models.FieldCondition(key="is_active", match=models.MatchValue(value=True))
 
@@ -266,23 +274,22 @@ class QdrantKnowledgeStore:
             query_vector = list(model.embed([clean_query]))[0]
             q_vec = query_vector.tolist() if hasattr(query_vector, "tolist") else list(query_vector)
 
-            # 1. Semantic Vector Query (active documents only)
             search_results = self._client.query_points(
                 collection_name=self.collection_name,
                 query=q_vec,
                 query_filter=models.Filter(must=[active_filter]),
-                limit=top_k * 2,
-                score_threshold=min_score,
+                limit=effective_top_k * 2,
+                score_threshold=effective_min_score,
                 with_payload=True,
             ).points
 
-            # 2. Check for exact identifier matches (Roll Number, UID) in query tokens
             candidate_tokens = [re.sub(r"[^A-Za-z0-9]", "", t).upper() for t in clean_query.split()]
             id_tokens = list({t for t in candidate_tokens if _ID_TOKEN_PATTERN.match(t)})
 
             exact_matches = []
             if id_tokens:
                 try:
+                    id_candidates = [i.lower() for i in id_tokens] + [f"student_{i.lower()}" for i in id_tokens]
                     exact_filter = models.Filter(
                         must=[
                             active_filter,
@@ -291,7 +298,7 @@ class QdrantKnowledgeStore:
                                     models.FieldCondition(key="aliases", match=models.MatchAny(any=id_tokens)),
                                     models.FieldCondition(
                                         key="id",
-                                        match=models.MatchAny(any=[f"student_{i.lower()}" for i in id_tokens]),
+                                        match=models.MatchAny(any=id_candidates),
                                     ),
                                 ]
                             ),
@@ -300,14 +307,13 @@ class QdrantKnowledgeStore:
                     hits = self._client.scroll(
                         collection_name=self.collection_name,
                         scroll_filter=exact_filter,
-                        limit=top_k,
+                        limit=effective_top_k,
                         with_payload=True,
                     )[0]
                     exact_matches.extend(hits)
                 except Exception as ex:
                     logger.debug(f"Exact match check exception: {ex}")
 
-            # Combine exact matches (boosted to 100.0) and semantic matches
             combined: Dict[str, Dict[str, Any]] = {}
 
             for hit in exact_matches:
@@ -341,7 +347,7 @@ class QdrantKnowledgeStore:
 
             results = list(combined.values())
             results.sort(key=lambda x: x["score"], reverse=True)
-            return results[:top_k]
+            return results[:effective_top_k]
 
         except Exception as e:
             logger.error(f"Error executing Qdrant search for '{clean_query}': {e}", exc_info=True)
@@ -385,13 +391,7 @@ class QdrantKnowledgeStore:
             return []
 
     def get_document(self, doc_id: str, include_private: bool = False) -> Optional[Dict[str, Any]]:
-        """Retrieves a single document by doc_id.
-
-        Args:
-            doc_id: The document identifier (e.g. 'student_250001010001').
-            include_private: If True, returns private metadata fields for admin/script use.
-                             Defaults to False to prevent exposing sensitive data.
-        """
+        """Retrieves a single document by doc_id."""
         if not self.is_available() or not self._client:
             return None
 

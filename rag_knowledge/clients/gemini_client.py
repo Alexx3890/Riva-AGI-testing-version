@@ -1,9 +1,4 @@
-"""Google Gemini Client for RAG Knowledge Synthesis.
-
-Uses Google Gemini's REST API (gemini-flash-latest / Gemini Flash models) to
-synthesize conversational, voice-optimized responses based on retrieved context.
-Zero external runtime dependencies (pure standard library urllib).
-"""
+"""Google Gemini client for RAG knowledge synthesis."""
 
 import asyncio
 import json
@@ -23,8 +18,16 @@ from ..prompts import (
 
 logger = logging.getLogger("rag.gemini")
 
-DEFAULT_GEMINI_MODEL = "gemini-flash-lite-latest"
-FALLBACK_GEMINI_MODELS = ["gemini-3-flash-preview", "gemini-flash-latest"]
+DEFAULT_GEMINI_MODEL = (
+    os.getenv("GEMINI_RAG_MODEL", "").strip()
+    or os.getenv("GEMINI_MODEL", "").strip()
+    or os.getenv("GEMINI_DEFAULT_MODEL", "gemini-3.5-flash").strip()
+)
+FALLBACK_GEMINI_MODELS = [
+    m.strip()
+    for m in os.getenv("GEMINI_FALLBACK_MODELS", "gemini-3-flash-preview,gemini-flash-lite-latest").split(",")
+    if m.strip()
+]
 
 
 class GeminiRAGClient:
@@ -34,9 +37,16 @@ class GeminiRAGClient:
         self,
         api_key: Optional[str] = None,
         model: Optional[str] = None,
+        fallback_models: Optional[list] = None,
         timeout: Optional[float] = None,
         system_instruction: Optional[str] = None,
     ):
+        try:
+            from rag_knowledge import load_env
+            load_env()
+        except ImportError:
+            pass
+
         self.api_key = api_key if api_key is not None else os.getenv("GEMINI_API_KEY", "").strip()
         if model is not None:
             self.model = model
@@ -46,7 +56,8 @@ class GeminiRAGClient:
             if gen_model and "live" in gen_model.lower():
                 gen_model = ""
             self.model = rag_model or gen_model or DEFAULT_GEMINI_MODEL
-        env_timeout = float(os.getenv("GEMINI_TIMEOUT", "4.0"))
+        self.fallback_models = fallback_models if fallback_models is not None else FALLBACK_GEMINI_MODELS
+        env_timeout = float(os.getenv("GEMINI_TIMEOUT", "20.0"))
         self.timeout = timeout if timeout is not None else env_timeout
         self.system_instruction = system_instruction or DEFAULT_SYSTEM_INSTRUCTION
 
@@ -91,22 +102,20 @@ class GeminiRAGClient:
                 }
             ],
             "generationConfig": {
-                "maxOutputTokens": 500,
-                "temperature": 0.2,
+                "maxOutputTokens": int(os.getenv("GEMINI_MAX_OUTPUT_TOKENS", "1500")),
+                "temperature": float(os.getenv("GEMINI_TEMPERATURE", "0.2")),
             }
         }
 
-        # Send API key via x-goog-api-key header rather than URL query parameter to prevent logging leaks
         headers = {
             "Content-Type": "application/json",
             "User-Agent": "RivaRAG/1.0",
             "x-goog-api-key": api_key,
         }
 
-        # Build list of models to try (configured model first, then fallback models)
         models_to_try = [self.model]
-        for fb in FALLBACK_GEMINI_MODELS:
-            if fb not in models_to_try:
+        for fb in self.fallback_models:
+            if fb and fb not in models_to_try:
                 models_to_try.append(fb)
 
         deadline = time.time() + max(self.timeout * 1.5, 6.0)
@@ -131,7 +140,6 @@ class GeminiRAGClient:
                             if finish_reason not in ("STOP", ""):
                                 logger.debug("Gemini response (%s) finishReason: %s", model_name, finish_reason)
                             parts = cand.get("content", {}).get("parts", [])
-                            # Join all text parts to avoid losing multi-part responses
                             text_parts = [p.get("text", "") for p in parts if "text" in p]
                             if text_parts:
                                 return "".join(text_parts).strip(), None
@@ -152,7 +160,6 @@ class GeminiRAGClient:
                 answer, err_code = _call_api_with_model(model_candidate)
                 if answer:
                     return answer
-                # Retry on 503 (high demand), 429 (rate-limit), 404 (unavailable), 408 (timeout), or network errors
                 if err_code not in (503, 429, 404, 408, None):
                     break
             return None

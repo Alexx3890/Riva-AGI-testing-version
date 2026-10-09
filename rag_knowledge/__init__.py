@@ -8,10 +8,7 @@ from pathlib import Path
 
 
 def load_env() -> None:
-    """Loads environment variables from package .env or project root .env.
-
-    Prefers python-dotenv if installed, otherwise parses key-value pairs safely.
-    """
+    """Load environment variables from package or root .env file."""
     if os.getenv("RAG_DISABLE_LOAD_ENV", "").lower() in ("true", "1", "yes"):
         return
 
@@ -58,8 +55,6 @@ from .clients.gemini_client import GeminiRAGClient
 from .service import RAGService, query_rag, get_rag_service
 from .storage.qdrant_storage import QdrantKnowledgeStore
 from . import clients, ingestion, prompts, retrieval, service, storage
-
-# Aliases for backward compatibility
 from .retrieval import retriever
 from .clients import gemini_client
 from .ingestion import ingest
