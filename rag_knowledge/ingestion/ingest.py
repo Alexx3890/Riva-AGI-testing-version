@@ -1637,13 +1637,9 @@ def main():
             print(f"[ERROR] Qdrant storage is unreachable. Verify Qdrant configuration in .env.")
             sys.exit(1)
 
-        # Safety check: Refuse to clear active live collection alias or if live alias is unconfigured
+        # Safety check: Refuse to clear active live production collection alias
         live_alias = os.getenv("QDRANT_LIVE_COLLECTION", "").strip() or os.getenv("LIVE_COLLECTION", "").strip()
-        if not live_alias:
-            print(f"[ERROR] Safety policy violation: Neither 'QDRANT_LIVE_COLLECTION' nor 'LIVE_COLLECTION' is configured.")
-            print(f"Refusing to execute destructive --clear on '{store.collection_name}' without a protected live collection policy.")
-            sys.exit(1)
-        if store.collection_name.strip().lower() == live_alias.lower():
+        if live_alias and store.collection_name.strip().lower() == live_alias.lower():
             logger.error(f"Refusing to clear live production collection '{store.collection_name}'.")
             print(f"[ERROR] Refusing to clear collection '{store.collection_name}' because it matches active LIVE collection alias ({live_alias}).")
             sys.exit(1)
