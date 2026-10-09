@@ -104,3 +104,23 @@ def test_multi_format_ingestion(tmp_path):
 
     docs = load_source_documents(tmp_path)
     assert len(docs) >= 4
+
+
+def test_separate_vision_and_text_api_keys(monkeypatch):
+    from rag_knowledge.ingestion.ingest import get_vision_api_key, get_vision_model
+    from rag_knowledge.clients.gemini_client import GeminiRAGClient
+
+    # Set distinct keys for vision and text
+    monkeypatch.setenv("GEMINI_API_KEY", "general_key")
+    monkeypatch.setenv("GEMINI_TEXT_API_KEY", "dedicated_text_key")
+    monkeypatch.setenv("GEMINI_VISION_API_KEY", "dedicated_vision_key")
+    monkeypatch.setenv("GEMINI_VISION_MODEL", "gemini-vision-custom")
+
+    # Text client uses text key
+    client = GeminiRAGClient()
+    assert client.api_key == "dedicated_text_key"
+
+    # Vision extractor uses vision key and vision model
+    assert get_vision_api_key() == "dedicated_vision_key"
+    assert get_vision_model() == "gemini-vision-custom"
+

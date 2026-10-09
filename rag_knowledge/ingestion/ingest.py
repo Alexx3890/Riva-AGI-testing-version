@@ -669,12 +669,39 @@ def load_pdf_documents(filepath: Path) -> List[Dict[str, Any]]:
         return []
 
 
+def get_vision_api_key() -> str:
+    """Retrieves dedicated vision API key, falling back to general GEMINI_API_KEY."""
+    load_env()
+    return os.getenv("GEMINI_VISION_API_KEY", "").strip() or os.getenv("GEMINI_API_KEY", "").strip()
+
+
+def get_vision_model() -> str:
+    """Retrieves dedicated vision model from environment."""
+    load_env()
+    return (
+        os.getenv("GEMINI_VISION_MODEL", "").strip()
+        or os.getenv("GEMINI_RAG_MODEL", "").strip()
+        or os.getenv("GEMINI_MODEL", "").strip()
+        or os.getenv("GEMINI_DEFAULT_MODEL", "").strip()
+    )
+
+
+def get_vision_fallback_models() -> list[str]:
+    """Retrieves fallback models for vision transcription."""
+    load_env()
+    raw = os.getenv("GEMINI_VISION_FALLBACK_MODELS", "").strip()
+    if raw:
+        return [m.strip() for m in raw.split(",") if m.strip()]
+    from ..clients.gemini_client import get_fallback_gemini_models
+    return get_fallback_gemini_models()
+
+
 def extract_image_text(filepath: Path) -> str:
     """Extracts textual and structured content from an image via Gemini Vision or local OCR."""
     load_env()
-    api_key = os.getenv("GEMINI_API_KEY", "").strip()
+    api_key = get_vision_api_key()
 
-    # 1. Primary: Gemini Vision API
+    # 1. Primary: Gemini Vision API (using dedicated vision key & model)
     if api_key:
         try:
             import base64
@@ -695,11 +722,9 @@ def extract_image_text(filepath: Path) -> str:
             with open(filepath, "rb") as f:
                 b64_data = base64.b64encode(f.read()).decode("utf-8")
 
-            from ..clients.gemini_client import get_default_gemini_model, get_fallback_gemini_models
-
-            default_model = get_default_gemini_model()
-            fallback_models = get_fallback_gemini_models()
-            model_candidates = ([default_model] if default_model else []) + fallback_models
+            primary_model = get_vision_model()
+            fallback_models = get_vision_fallback_models()
+            model_candidates = ([primary_model] if primary_model else []) + fallback_models
             valid_models = []
             for m in model_candidates:
                 if m and "live" not in m.lower() and m not in valid_models:
