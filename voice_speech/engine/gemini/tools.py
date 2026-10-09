@@ -153,8 +153,39 @@ NEWS_TOOL_DECLARATION = types.FunctionDeclaration(
     ),
 )
 
+ORCHESTRATION_TOOL_DECLARATION = types.FunctionDeclaration(
+    name="run_orchestration_task",
+    description=(
+        "Execute an autonomous multi-agent task via Riva-AGI's orchestration pipeline. "
+        "Use this tool whenever the user asks to write code, debug software, inspect files or directories, "
+        "create or edit files, execute system commands, or solve complex technical problems."
+    ),
+    parameters=types.Schema(
+        type="OBJECT",
+        properties={"task": types.Schema(type="STRING", description="Detailed description of the autonomous task to perform")},
+        required=["task"],
+    ),
+)
+
+OPEN_BROWSER_TOOL_DECLARATION = types.FunctionDeclaration(
+    name="open_website_in_browser",
+    description="Open a specified website or web page in Google Chrome or the default web browser.",
+    parameters=types.Schema(
+        type="OBJECT",
+        properties={
+            "url": types.Schema(type="STRING", description="The complete web address (URL) to open, e.g. https://www.google.com"),
+            "browser": types.Schema(type="STRING", description="Browser to use: 'chrome' or 'default' (defaults to 'chrome')")
+        },
+        required=["url"],
+    ),
+)
+
 DEFAULT_TOOLS: List[types.Tool] = [
-    types.Tool(function_declarations=[NEWS_TOOL_DECLARATION])
+    types.Tool(function_declarations=[
+        NEWS_TOOL_DECLARATION,
+        ORCHESTRATION_TOOL_DECLARATION,
+        OPEN_BROWSER_TOOL_DECLARATION,
+    ])
 ]
 
 
@@ -163,9 +194,83 @@ async def _handle_get_latest_news(args: Dict[str, Any]) -> str:
     return await fetch_news_summary(query)
 
 
+async def execute_orchestration_task(task: str) -> str:
+    """Dispatches a task to the RIVA LangGraph multi-agent orchestrator."""
+    import uuid
+    loop = asyncio.get_running_loop()
+
+    def _run() -> str:
+        try:
+            from orchestration.orchestrator.main import create_orchestrator
+            from orchestration import InputData, InputType
+
+            app = create_orchestrator()
+            task_id = f"voice-{uuid.uuid4().hex[:8]}"
+            payload = InputData(input_type=InputType.TEXT, text_content=task, metadata={"source": "voice"})
+            state = {
+                "task_payload": payload,
+                "agent": "fallback",
+                "response_payload": None,
+                "task_id": task_id,
+                "session_id": f"voice-sess-{uuid.uuid4().hex[:6]}",
+                "source": "voice",
+                "complexity": "simple",
+                "routing_decision": "fallback",
+                "plan": [],
+                "current_step": 0,
+                "completed_steps": [],
+                "feedback": "",
+                "intent": "unknown",
+                "confidence": 0.0,
+            }
+            final_res = None
+            for step in app.stream(state):
+                for node_name, node_update in step.items():
+                    if isinstance(node_update, dict):
+                        if "response_payload" in node_update and node_update["response_payload"]:
+                            final_res = node_update["response_payload"]
+            
+            if final_res and hasattr(final_res, "content") and final_res.content:
+                return str(final_res.content)
+            return "Orchestration task completed successfully."
+        except Exception as e:
+            logger.error(f"Error in execute_orchestration_task: {e}", exc_info=True)
+            return f"Error executing task: {str(e)}"
+
+    res = await loop.run_in_executor(None, _run)
+    return res[:1500]
+
+
+async def _handle_run_orchestration_task(args: Dict[str, Any]) -> str:
+    task = str((args or {}).get("task", "")).strip()
+    if not task:
+        return "Error: No task description provided."
+    return await execute_orchestration_task(task)
+
+
+async def _handle_open_website_in_browser(args: Dict[str, Any]) -> str:
+    url = str((args or {}).get("url", "")).strip()
+    browser = str((args or {}).get("browser", "chrome")).strip()
+    if not url:
+        return "Error: No URL provided."
+    
+    loop = asyncio.get_running_loop()
+    try:
+        from orchestration.tools import tool_registry
+        return await loop.run_in_executor(
+            None, 
+            lambda: tool_registry.execute("open_browser", url=url, browser=browser)
+        )
+    except Exception as e:
+        logger.error(f"Error opening browser for '{url}': {e}")
+        return f"Error opening browser: {str(e)}"
+
+
 # Extensible Tool Handler Registry
 TOOL_REGISTRY: Dict[str, Callable[[Dict[str, Any]], Awaitable[str]]] = {
     "get_latest_news": _handle_get_latest_news,
+    "run_orchestration_task": _handle_run_orchestration_task,
+    "open_website_in_browser": _handle_open_website_in_browser,
 }
 
 

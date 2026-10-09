@@ -51,6 +51,17 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 WEB_DIR = os.path.join(BASE_DIR, "web")
 
 
+@app.get("/health", tags=["operations"])
+async def health_check():
+    """Lightweight liveness endpoint for container and platform probes."""
+    return {
+        "status": "ok",
+        "service": "riva-voice-gateway",
+        "active_sessions": session_manager.active_sessions,
+        "max_concurrent_sessions": session_manager.max_concurrent_sessions,
+    }
+
+
 # Static Web UI Routes
 @app.get("/")
 async def get_index():
